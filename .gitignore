@@ -13,6 +13,8 @@ venv/
 # 本機產物 / 測試
 _samples/
 _batch_*/
+_debug_*/
+tests/_out/
 output/
 pipeline_out/
 *.zip
@@ -23,3 +25,6 @@ pipeline_out/
 *.swp
 .DS_Store
 Thumbs.db
+
+tests/fixtures/
+tests/_out_run*.log

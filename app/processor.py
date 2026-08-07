@@ -710,12 +710,32 @@ def try_period_crop(
     if not xs or not ys:
         return None, "未偵測到週期"
 
+    # 全解析度自相關強峰（縮圖常漏掉接近半幅的真週期，如 250 on 627）
+    full_gray = _luminance_map(arr)
+    full_x: list[int] = []
+    full_y: list[int] = []
+    for p, score in _autocorr_best_periods(
+        full_gray.mean(1), max(16, h // 40), h // 2, top_k=5
+    ):
+        if score >= 0.25 and h * 0.12 <= p <= h * 0.48:
+            full_y.extend([int(p), int(round(p / 2))])
+    for p, score in _autocorr_best_periods(
+        full_gray.mean(0), max(16, w // 40), w // 2, top_k=5
+    ):
+        if score >= 0.25 and w * 0.12 <= p <= w * 0.48:
+            full_x.extend([int(p), int(round(p / 2))])
+    # 強峰置頂，再接縮圖候選
+    xs = list(dict.fromkeys([*full_x, *xs]))
+    ys = list(dict.fromkeys([*full_y, *ys]))
+    xs = [p for p in xs if 16 <= p <= w // 2][:20]
+    ys = [p for p in ys if 16 <= p <= h // 2][:20]
+
     best_tile: np.ndarray | None = None
     best_rank = (base + base_seam * 0.35, base_seam, base)
     best_detail = ""
 
-    for px in xs[:8]:
-        for py in ys[:8]:
+    for px in xs[:12]:
+        for py in ys[:12]:
             # 試最大與次大整數倍：剛好整除時 max 倍無法做相位偏移
             nmax = w // px
             mmax = h // py
@@ -1067,6 +1087,17 @@ def tile_2x2_multi(
     if prefer_plain or (cv >= 0.85 and ch >= 0.85):
         return _plain()
 
+    # 疏點綴（花圈／碎花）：錯位緊挨補白會打亂晶格節奏，看起來像接縫空一截
+    # 滿鋪斜紋前景通常更密，仍走後面的錯位邏輯
+    bg_est = np.median(arr.reshape(-1, 3), axis=0)
+    fg_r = float(
+        np.mean(
+            np.linalg.norm(arr.astype(np.float64) - bg_est, axis=2) > 40.0
+        )
+    )
+    if fg_r < 0.20 and (plain_v + plain_h) < 90.0:
+        return _plain()
+
     blurred = np.asarray(
         Image.fromarray(arr).filter(ImageFilter.GaussianBlur(radius=12)),
         dtype=np.uint8,
@@ -1295,19 +1326,65 @@ def make_seamless_hard_cut(
 
     # 規則點綴：構造裁切；禁止清邊打散陣列、禁止邊緣相關備選勝出
     if discrete:
+        from app.discrete_lattice import (
+            _fg_mask_merged as _d_fg,
+            _interior_median_motif_area,
+            _rank_tile,
+            wrap_gap_ratios,
+        )
+
         unit_d, detail_d = try_make_discrete_seamless(arr, bg, threshold)
         if "FAIL" not in detail_d:
             return (
                 Image.fromarray(unit_d, mode="RGB"),
                 f"點綴（前景 {ratio:.0%}）：{detail_d}",
             )
-        # 晶格失敗：在滿鋪／清邊補花中取接縫更好者
-        candidates: list[tuple[float, np.ndarray, str]] = []
-        unit_f, detail_f = try_make_dense_seamless(arr)
-        fv, fh = _tile_seam_scores(unit_f)
+        # 晶格未硬通過：用「跨縫完整性／間距」選備選，禁止只靠接縫色差
+        # （錯誤週期裁切常把色差修好，卻把花距拉成 2 倍，看起來很空）
+        med = _interior_median_motif_area(_d_fg(arr, bg, threshold))
+
+        def _integrity_key(tile: np.ndarray) -> tuple[int, float]:
+            tier, sc = _rank_tile(tile, bg, threshold, med)
+            gx, gy = wrap_gap_ratios(tile, bg, threshold, med=med)
+            gap_pen = (abs(gx - 1.0) + abs(gy - 1.0)) * 60.0
+            return (tier, sc + gap_pen)
+
+        candidates: list[tuple[tuple[int, float], np.ndarray, str]] = []
+        key_d = _integrity_key(unit_d)
+        # FAIL 結果不得靠「分數碰巧好看」壓過滿鋪／原圖
+        if "FAIL" in detail_d:
+            key_d = (max(key_d[0], 2) + 1, key_d[1] + 120.0)
         candidates.append(
             (
-                fv + fh,
+                key_d,
+                unit_d,
+                f"點綴最佳嘗試（前景 {ratio:.0%}）：{detail_d}",
+            )
+        )
+        candidates.append(
+            (
+                _integrity_key(arr),
+                arr.copy(),
+                f"點綴保留原圖（前景 {ratio:.0%}，晶格未對齊）",
+            )
+        )
+        unit_f, detail_f = try_make_dense_seamless(arr)
+        gx0, gy0 = wrap_gap_ratios(arr, bg, threshold, med=med)
+        gxf, gyf = wrap_gap_ratios(unit_f, bg, threshold, med=med)
+        gap0 = abs(gx0 - 1.0) + abs(gy0 - 1.0)
+        gapf = abs(gxf - 1.0) + abs(gyf - 1.0)
+        dense_key = _integrity_key(unit_f)
+        # 間距明顯變差（例如≈2 倍空檔）→ 降級；但若接縫色差明顯更好仍保留輕罰
+        if gapf > gap0 + 0.25 or max(gxf, gyf) >= 1.6:
+            sv0, sh0 = _tile_seam_scores(arr)
+            svf, shf = _tile_seam_scores(unit_f)
+            if (svf + shf) < (sv0 + sh0) * 0.75:
+                dense_key = (dense_key[0], dense_key[1] + 40.0)
+            else:
+                dense_key = (dense_key[0] + 1, dense_key[1] + 200.0)
+        candidates.append(
+            (
+                dense_key,
                 unit_f,
                 f"滿鋪回退（點綴未對齊，前景 {ratio:.0%}）：{detail_f}",
             )
@@ -1326,10 +1403,9 @@ def make_seamless_hard_cut(
                     > structural_edge_score(arr) * 1.08
                 )
                 if not worse:
-                    sv, shs = _tile_seam_scores(filled)
                     candidates.append(
                         (
-                            sv + shs,
+                            _integrity_key(filled),
                             filled,
                             f"點綴未對齊改清邊補花（前景 {ratio:.0%}）",
                         )
@@ -1338,10 +1414,20 @@ def make_seamless_hard_cut(
         _score, best_arr, best_msg = candidates[0]
         return Image.fromarray(best_arr, mode="RGB"), best_msg
 
-    # 稀疏不規則才清邊補花
+    # 稀疏不規則才清邊補花（與滿鋪週期裁切比接縫，避免清邊打壞已近無縫圖）
     use_motif = margin_px > 0 and ratio < 0.16 and not discrete
 
     if use_motif:
+        candidates: list[tuple[float, np.ndarray, str]] = []
+        unit_f, detail_f = try_make_dense_seamless(arr)
+        fv, fh = _tile_seam_scores(unit_f)
+        candidates.append(
+            (
+                fv + fh,
+                unit_f,
+                f"點綴回退滿鋪（前景 {ratio:.0%}）：{detail_f}",
+            )
+        )
         motifs = extract_interior_motifs(arr, bg, threshold, margin_px)
         cleaned, removed = remove_edge_touching_components(
             arr, bg, threshold, margin_px
@@ -1359,16 +1445,29 @@ def make_seamless_hard_cut(
         )
         too_empty = int_fg > 0.05 and edge_fg < int_fg * 0.25
         worse = structural_edge_score(filled) > structural_edge_score(arr) * 1.02
-        if too_empty or worse or len(motifs) < 2:
-            unit, detail = try_make_dense_seamless(arr)
-            return (
-                Image.fromarray(unit, mode="RGB"),
-                f"點綴回退滿鋪（前景 {ratio:.0%}）：{detail}",
+        if not (too_empty or worse or len(motifs) < 2):
+            sv, shs = _tile_seam_scores(filled)
+            changed = float((filled != arr).any(axis=2).mean())
+            # 改動越大越罰：避免清邊「縫分數好看」卻打散花回
+            candidates.append(
+                (
+                    sv + shs + changed * 80.0,
+                    filled,
+                    f"點綴模式（前景 {ratio:.0%}）：清邊後補花",
+                )
             )
-        return (
-            Image.fromarray(filled, mode="RGB"),
-            f"點綴模式（前景 {ratio:.0%}）：清邊後補花",
+        # 原圖也進候選：已接近無縫時勿亂動
+        bv, bh = _tile_seam_scores(arr)
+        candidates.append(
+            (
+                bv + bh + 2.0,
+                arr.copy(),
+                f"點綴保留原圖（前景 {ratio:.0%}）",
+            )
         )
+        candidates.sort(key=lambda t: t[0])
+        _score, best_arr, best_msg = candidates[0]
+        return Image.fromarray(best_arr, mode="RGB"), best_msg
 
     unit, detail = try_make_dense_seamless(arr)
     if margin_px == 0 and ratio < 0.18:
