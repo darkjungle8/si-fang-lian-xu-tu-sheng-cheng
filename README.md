@@ -19,8 +19,8 @@
 ## 安裝
 
 ```bash
-git clone https://github.com/darkjungle8/四方连续图生成.git
-cd 四方连续图生成
+git clone https://github.com/darkjungle8/si-fang-lian-xu-tu-sheng-cheng.git
+cd si-fang-lian-xu-tu-sheng-cheng
 pip install -r requirements.txt
 ```
 
@@ -78,7 +78,7 @@ Windows 也可雙擊 `啟動GUI.bat`。
 ## 專案結構
 
 ```
-四方连续图生成/
+si-fang-lian-xu-tu-sheng-cheng/
   main.py
   啟動GUI.bat
   requirements.txt
