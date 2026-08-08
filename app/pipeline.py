@@ -14,6 +14,7 @@ from app.paths import ensure_kuotu_on_path
 from app.processor import make_seamless_hard_cut, tile_2x2_multi
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+SKIP_DIR_NAMES = frozenset({"output", "pipeline_out", "__pycache__"})
 
 EXPAND_FORMATS = {
     "TIFF": ".tif",
@@ -23,6 +24,50 @@ EXPAND_FORMATS = {
 
 LogFn = Callable[[str], None]
 ProgressFn = Callable[[float], None]
+
+
+def _path_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def collect_folder_images(
+    root: Path,
+    *,
+    recursive: bool = True,
+    exclude_roots: list[Path] | None = None,
+) -> list[Path]:
+    """收集資料夾內圖片；遞迴時略過 output／pipeline_out 等目錄。"""
+    root = root.resolve()
+    excludes = [p.resolve() for p in (exclude_roots or [])]
+    pattern = "**/*" if recursive else "*"
+    files: list[Path] = []
+    for p in sorted(root.glob(pattern)):
+        if not p.is_file() or p.suffix.lower() not in IMAGE_EXTENSIONS:
+            continue
+        try:
+            rel = p.resolve().relative_to(root)
+        except ValueError:
+            continue
+        if any(part in SKIP_DIR_NAMES for part in rel.parts[:-1]):
+            continue
+        if any(_path_under(p, ex) for ex in excludes):
+            continue
+        files.append(p)
+    return files
+
+
+def mirror_dest(src: Path, src_root: Path, out_root: Path, *, name: str | None = None) -> Path:
+    """依 src 相對 src_root 的路徑，鏡射到 out_root；可覆寫檔名。"""
+    try:
+        rel = src.resolve().relative_to(src_root.resolve())
+    except ValueError:
+        rel = Path(src.name)
+    dest_name = name if name is not None else rel.name
+    return out_root / rel.parent / dest_name
 
 
 @dataclass
@@ -213,8 +258,8 @@ def run_full_pipeline(
     """
     對資料夾內圖片跑完整流程，只輸出最終結果（不寫 units／previews）。
 
-    - 一般模式：處理 input_dir 內的圖片檔
-    - SKU 模式（提供 excel_path）：子資料夾以 SKU 命名，裁切尺寸由 Excel 尺碼對應
+    - 一般模式：遞迴處理 input_dir 內圖片，輸出保留相對資料夾結構
+    - SKU 模式（提供 excel_path）：第一層子資料夾＝SKU，其內可再有巢狀目錄
     """
     if do_expand:
         ensure_kuotu_on_path()
@@ -242,24 +287,20 @@ def run_full_pipeline(
             on_progress=on_progress,
         )
 
-    files = sorted(
-        p
-        for p in input_dir.iterdir()
-        if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
-    )
+    files = collect_folder_images(input_dir, recursive=True, exclude_roots=[out])
     if not files:
         raise ValueError(f"資料夾內沒有支援的圖片：{input_dir}")
 
     log(f"輸入：{input_dir}")
     log(f"輸出：{out}")
     fmt_label = expand_ext.lstrip(".").upper() if do_expand else "單元圖"
-    log(f"共 {len(files)} 張 | 最終輸出={fmt_label}（不保留中間檔）")
+    log(f"共 {len(files)} 張 | 最終輸出={fmt_label}（保留子資料夾結構）")
 
     results: list[PipelineItemResult] = []
     total = len(files)
 
     for i, path in enumerate(files):
-        dest = out / f"{path.stem}{expand_ext}"
+        dest = mirror_dest(path, input_dir, out, name=f"{path.stem}{expand_ext}")
         try:
             item = _process_one_image(
                 path,
@@ -273,7 +314,11 @@ def run_full_pipeline(
                 do_expand=do_expand,
                 log=log,
             )
-            log(f"  [{i + 1}/{total}] {path.name} OK")
+            try:
+                rel_label = str(path.relative_to(input_dir))
+            except ValueError:
+                rel_label = path.name
+            log(f"  [{i + 1}/{total}] {rel_label} OK")
         except Exception as exc:  # noqa: BLE001 — 批次繼續
             item = PipelineItemResult(
                 source=str(path),
@@ -310,11 +355,9 @@ def _run_sku_pipeline(
     log: LogFn,
     on_progress: ProgressFn | None,
 ) -> list[PipelineItemResult]:
-    """子資料夾 = SKU，裁切尺寸由 Excel 一一對應。"""
+    """第一層子資料夾 = SKU；其內遞迴讀圖，輸出保留 SKU 資料夾名與相對結構。"""
     ensure_kuotu_on_path()
     from image_pipeline import (  # noqa: WPS433
-        _under,
-        collect_images,
         extract_sku_from_folder_name,
         load_sku_catalog,
     )
@@ -324,11 +367,15 @@ def _run_sku_pipeline(
 
     sku_catalog = load_sku_catalog(excel_path)
     sku_sizes = sku_catalog.sizes
-    sku_dirs = sorted(p for p in parent_dir.iterdir() if p.is_dir())
+    sku_dirs = sorted(
+        p
+        for p in parent_dir.iterdir()
+        if p.is_dir() and p.name not in SKIP_DIR_NAMES and not _path_under(p, out)
+    )
     if not sku_dirs:
         raise ValueError(f"父資料夾下沒有子資料夾：{parent_dir}")
 
-    jobs: list[tuple[Path, Path, str, float, float]] = []
+    jobs: list[tuple[Path, Path, Path, str, float, float]] = []
     skipped = 0
 
     for sku_dir in sku_dirs:
@@ -350,17 +397,20 @@ def _run_sku_pipeline(
             continue
 
         crop_w_cm, crop_h_cm = size
-        files = collect_images(sku_dir, recursive=False)
-        files = [src for src in files if not _under(src, out)]
+        files = collect_folder_images(sku_dir, recursive=True, exclude_roots=[out])
         if not files:
             log(f"略過資料夾 {folder_name}（SKU={sku}）: 無圖片")
             skipped += 1
             continue
 
-        log(f"匹配 {folder_name} → SKU {sku} → 裁切 {crop_w_cm:g}x{crop_h_cm:g} cm")
+        log(
+            f"匹配 {folder_name} → SKU {sku} → 裁切 {crop_w_cm:g}x{crop_h_cm:g} cm"
+            f"（{len(files)} 張）"
+        )
+        sku_out = out / folder_name
         for src in files:
-            dest = (out / folder_name / src.stem).with_suffix(expand_ext)
-            jobs.append((src, dest, sku, crop_w_cm, crop_h_cm))
+            dest = mirror_dest(src, sku_dir, sku_out, name=f"{src.stem}{expand_ext}")
+            jobs.append((src, dest, sku_dir, sku, crop_w_cm, crop_h_cm))
 
     log(f"輸入父目錄：{parent_dir}")
     log(f"Excel：{excel_path}")
@@ -369,7 +419,7 @@ def _run_sku_pipeline(
         f"SKU 對照表 {len(sku_sizes)} 筆 | 子資料夾 {len(sku_dirs)} 個 | "
         f"待處理 {len(jobs)} 張 | 略過資料夾 {skipped} 個"
     )
-    log("只輸出最終結果（不保留單元圖／預覽）\n")
+    log("只輸出最終結果；每個 SKU 資料夾名稱與張數對應輸出\n")
 
     if not jobs:
         raise ValueError("沒有可處理的圖片（請確認 SKU 資料夾名稱與 Excel 尺碼）。")
@@ -377,8 +427,12 @@ def _run_sku_pipeline(
     results: list[PipelineItemResult] = []
     total = len(jobs)
 
-    for i, (src, dest, sku, crop_w_cm, crop_h_cm) in enumerate(jobs, start=1):
+    for i, (src, dest, sku_dir, sku, crop_w_cm, crop_h_cm) in enumerate(jobs, start=1):
         job_expand = _settings_with_crop(expand, crop_w_cm, crop_h_cm)
+        try:
+            rel_label = str(src.relative_to(sku_dir.parent))
+        except ValueError:
+            rel_label = f"{src.parent.name}/{src.name}"
         try:
             item = _process_one_image(
                 src,
@@ -395,7 +449,7 @@ def _run_sku_pipeline(
             item.sku = sku
             item.crop_w_cm = crop_w_cm
             item.crop_h_cm = crop_h_cm
-            log(f"  [{i}/{total}] {src.parent.name}/{src.name} OK")
+            log(f"  [{i}/{total}] {rel_label} OK")
         except Exception as exc:  # noqa: BLE001
             item = PipelineItemResult(
                 source=str(src),
@@ -408,7 +462,7 @@ def _run_sku_pipeline(
                 crop_w_cm=crop_w_cm,
                 crop_h_cm=crop_h_cm,
             )
-            log(f"  [{i}/{total}] {src.parent.name}/{src.name} 失敗：{exc}")
+            log(f"  [{i}/{total}] {rel_label} 失敗：{exc}")
 
         results.append(item)
         if on_progress is not None:

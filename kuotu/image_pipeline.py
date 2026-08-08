@@ -36,17 +36,69 @@ DEFAULT_TARGET_H_CM = 100.0
 DEFAULT_WHITE_CM = 0.17
 DEFAULT_BLACK_CM = 0.08
 
-# 生产属性中的尺码，例如「尺码:40x50」或「片数:6PC,尺码:25x25」
-SIZE_RE = re.compile(
-    r"尺码\s*[:：]\s*(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)"
+# 尺碼數字對：45x55 / 45×55 / 45*55 / 45 X 55
+_SIZE_PAIR = r"(\d+(?:\.\d+)?)\s*[xX×*]\s*(\d+(?:\.\d+)?)"
+
+# 依優先序匹配；有單位時先取 cm，再退回純數字（視為 cm）或英吋換算
+# 每項：(名稱, 正則, 單位) — 正則須含兩個捕獲組 (寬, 高)
+SIZE_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
+    # 括號內厘米：15.75 X 19.69英寸(40x50厘米)
+    (
+        "paren_cm",
+        re.compile(rf"[\(（]\s*{_SIZE_PAIR}\s*(?:cm|CM|厘米)?\s*[\)）]"),
+        "cm",
+    ),
+    # 雙側帶 cm：45cm*55cm / 40 cm x 50 cm
+    (
+        "cm_both",
+        re.compile(
+            r"(\d+(?:\.\d+)?)\s*(?:cm|CM|厘米)\s*[xX×*]\s*"
+            r"(\d+(?:\.\d+)?)\s*(?:cm|CM|厘米)"
+        ),
+        "cm",
+    ),
+    # 後綴厘米：40x50厘米 / 40×50cm
+    (
+        "cm_suffix",
+        re.compile(rf"{_SIZE_PAIR}\s*(?:cm|CM|厘米)"),
+        "cm",
+    ),
+    # 生产属性標籤：尺码:45x55
+    (
+        "labeled",
+        re.compile(rf"尺码\s*[:：]\s*{_SIZE_PAIR}"),
+        "cm",
+    ),
+    # 英吋：18 x 22 inch / 39.37*59.08英寸
+    (
+        "inch",
+        re.compile(rf"{_SIZE_PAIR}\s*(?:inch(?:es)?|in|英寸)"),
+        "inch",
+    ),
+    # 純尺碼欄：45x55（視為 cm）
+    (
+        "plain",
+        re.compile(rf"^{_SIZE_PAIR}\s*$"),
+        "cm",
+    ),
 )
 
+# 相容舊呼叫（生产属性內嵌尺码）
+SIZE_RE = SIZE_PATTERNS[3][1]
+
+SKU_HEADER_NAMES = frozenset(
+    {"平台sku", "平台sku id", "平台skuid", "sku", "sku id", "skuid"}
+)
+SIZE_HEADER_NAMES = frozenset({"尺码", "尺碼", "size"})
+ATTR_HEADER_NAMES = frozenset({"生产属性", "生產屬性"})
+
 # 資料夾名 → 平台 SKU ID（依序匹配，取第一個命中）
-# 例：SKU45189918413 / sku-45189918413 / 45189918413
+# 例：SKU45189918413 / sku-45189918413 / 45189918413 / 11997725258-1
 FOLDER_SKU_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?i)^SKU[\s_\-]*(\d+)$"),  # SKU4518… / SKU_4518… / SKU-4518…
     re.compile(r"(?i)^SKU[\s_\-]*(\d+)"),  # SKU4518…_xxx（前綴帶數字）
     re.compile(r"^(\d+)$"),  # 純數字資料夾
+    re.compile(r"^(\d+)[-_].+"),  # 11997725258-1（-/_ 前為 SKU）
 )
 
 
@@ -162,7 +214,8 @@ def extract_sku_from_folder_name(folder_name: str) -> str | None:
     """
     從資料夾名稱抽出平台 SKU ID。
 
-    支援：SKU45189918413、sku-45189918413、45189918413 等。
+    支援：SKU45189918413、sku-45189918413、45189918413、11997725258-1 等。
+    「數字-後綴」時取連字號／底線前的數字為 SKU。
     """
     name = folder_name.strip()
     if not name:
@@ -193,13 +246,44 @@ def normalize_sku(value: object) -> str:
 
 
 def parse_size_cm(attr: object) -> tuple[float, float] | None:
-    """Extract (width_cm, height_cm) from 生产属性 text, or None if missing."""
+    """
+    從尺碼文字抽出 (寬_cm, 高_cm)。
+
+    支援純尺碼欄（45x55）、生产属性（尺码:45x55）、
+    cm／英吋單位，以及括號內厘米（優先）。
+    """
     if attr is None:
         return None
-    match = SIZE_RE.search(str(attr))
-    if not match:
+    text = str(attr).strip()
+    if not text:
         return None
-    return float(match.group(1)), float(match.group(2))
+    for _name, pattern, unit in SIZE_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        # 取前兩個非空捕獲組
+        nums = [g for g in match.groups() if g is not None]
+        if len(nums) < 2:
+            continue
+        w, h = float(nums[0]), float(nums[1])
+        if unit == "inch":
+            w *= CM_PER_INCH
+            h *= CM_PER_INCH
+        if w <= 0 or h <= 0:
+            return None
+        return w, h
+    return None
+
+
+def _norm_header(value: object) -> str:
+    return str(value or "").strip().lower().replace(" ", "")
+
+
+def _find_col(headers: list[object], names: frozenset[str]) -> int | None:
+    for i, cell in enumerate(headers):
+        if _norm_header(cell) in names:
+            return i
+    return None
 
 
 class SkuCatalog:
@@ -215,7 +299,11 @@ class SkuCatalog:
 
 
 def load_sku_catalog(excel_path: Path) -> SkuCatalog:
-    """Load all SKUs and those with parseable 尺码."""
+    """
+    讀取 Excel：第 1 欄（或表頭「平台SKU」）為 SKU；
+    優先讀「尺码」欄（截圖為 D 欄；若無「是否匹配」則常為第 3 欄），
+    否則回退解析「生产属性」。
+    """
     try:
         from openpyxl import load_workbook
     except ImportError as exc:
@@ -230,22 +318,61 @@ def load_sku_catalog(excel_path: Path) -> SkuCatalog:
     wb = load_workbook(excel_path, read_only=True, data_only=True)
     try:
         ws = wb.active
+        rows = list(ws.iter_rows(min_row=1, max_col=16, values_only=True))
+        if not rows:
+            return SkuCatalog(sizes={}, all_skus=set())
+
+        header = list(rows[0])
+        sku_col = _find_col(header, SKU_HEADER_NAMES)
+        size_col = _find_col(header, SIZE_HEADER_NAMES)
+        attr_col = _find_col(header, ATTR_HEADER_NAMES)
+        has_header = sku_col is not None or size_col is not None
+
+        # 無表頭時：A=SKU；尺碼優先第 3 欄(C)，再試第 4 欄(D)；生产属性=B
+        if sku_col is None:
+            sku_col = 0
+        if size_col is None and not has_header:
+            # 使用者所述「第三列才是尺碼」；亦相容含「是否匹配」時的 D 欄
+            size_col = 2
+        if attr_col is None and not has_header:
+            attr_col = 1
+
+        data_rows = rows[1:] if has_header else rows
+        # 舊表僅兩欄且表頭為「平台SKU ID」時仍跳過首列
+        if not has_header and rows:
+            first_sku = _norm_header(rows[0][0] if rows[0] else "")
+            if first_sku in SKU_HEADER_NAMES or first_sku in {
+                "平台skuid",
+                "平台sku id",
+            }:
+                data_rows = rows[1:]
+
         sizes: dict[str, tuple[float, float]] = {}
         all_skus: set[str] = set()
-        for i, row in enumerate(ws.iter_rows(min_row=1, max_col=2, values_only=True)):
+
+        for row in data_rows:
             if not row:
                 continue
-            sku_raw = row[0] if len(row) > 0 else None
-            attr_raw = row[1] if len(row) > 1 else None
-            if i == 0 and str(sku_raw or "").strip() in {"平台SKU ID", "SKU", "sku"}:
-                continue
+            sku_raw = row[sku_col] if sku_col < len(row) else None
             sku = normalize_sku(sku_raw)
             if not sku:
                 continue
             all_skus.add(sku)
-            size = parse_size_cm(attr_raw)
+
+            size: tuple[float, float] | None = None
+            # 1) 專用尺碼欄
+            if size_col is not None and size_col < len(row):
+                size = parse_size_cm(row[size_col])
+            # 2) 含「是否匹配」時若 C 欄不是尺碼，再試 D 欄
+            if size is None and size_col == 2 and len(row) > 3:
+                size = parse_size_cm(row[3])
+            # 3) 回退生产属性
+            if size is None and attr_col is not None and attr_col < len(row):
+                size = parse_size_cm(row[attr_col])
+
             if size is not None:
                 sizes[sku] = size
+
         return SkuCatalog(sizes=sizes, all_skus=all_skus)
     finally:
         wb.close()
@@ -506,17 +633,20 @@ def run_sku_batch(
             continue
 
         crop_w_cm, crop_h_cm = size
-        files = collect_images(sku_dir, recursive=False)
+        files = collect_images(sku_dir, recursive=True)
         files = [src for src in files if not _under(src, out)]
         if not files:
             log(f"略過資料夾 {folder_name}（SKU={sku}）: 無圖片")
             skipped_folders += 1
             continue
 
-        log(f"匹配 {folder_name} → SKU {sku} → 裁切 {crop_w_cm:g}x{crop_h_cm:g} cm")
+        log(
+            f"匹配 {folder_name} → SKU {sku} → 裁切 {crop_w_cm:g}x{crop_h_cm:g} cm"
+            f"（{len(files)} 張）"
+        )
         for src in files:
-            # 輸出保留原始資料夾名，方便對照
-            dest = (out / folder_name / src.name).with_suffix(".tif")
+            # 輸出保留原始資料夾名與相對路徑
+            dest = build_dest(src, sku_dir, out / folder_name)
             jobs.append((src, dest, crop_w_cm, crop_h_cm))
 
     log(f"輸入父目錄: {parent_dir}")

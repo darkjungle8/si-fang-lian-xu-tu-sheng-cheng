@@ -376,17 +376,31 @@ def _correct_half_pitch(
 ) -> tuple[float, float]:
     """
     交錯／磚縫格把兩列投影疊在一起時，軸向 pitch 常變成真實週期的一半。
-    用最近鄰距離校正：若 NN ≈ 2×pitch，則加倍。
+    用最近鄰距離校正：若 NN ≈ 2×pitch，則加倍；並避免 1/4 週期殘留。
     """
     nn = _nn_median_spacing(points)
     if nn < 16:
         return pitch_x, pitch_y
     out_x, out_y = pitch_x, pitch_y
-    # 門檻略寬：NN=1.55×pitch 仍視為半週期（花環交錯常見）
-    if pitch_x >= 8 and 1.5 * pitch_x <= nn <= 2.6 * pitch_x:
-        out_x = pitch_x * 2.0
-    if pitch_y >= 8 and 1.5 * pitch_y <= nn <= 2.6 * pitch_y:
-        out_y = pitch_y * 2.0
+
+    def _boost(p: float) -> float:
+        # 反覆加倍到接近 NN（碎花質心常估出 1/4～1/3 真週期）
+        cur = p
+        for _ in range(3):
+            if cur < 8:
+                break
+            if 1.45 * cur <= nn <= 2.7 * cur:
+                cur *= 2.0
+                continue
+            # NN 遠大於 pitch（>2.7×）也視為低估，最多拉到 ≥0.55×NN
+            if nn > 2.7 * cur and cur * 2.0 <= nn * 1.15:
+                cur *= 2.0
+                continue
+            break
+        return cur
+
+    out_x = _boost(out_x)
+    out_y = _boost(out_y)
     # 單軸半週期：NN 接近另一軸的完整 pitch
     if out_x == pitch_x and pitch_x >= 8 and out_y >= 16:
         if 1.5 * pitch_x <= out_y <= 2.6 * pitch_x and abs(nn - out_y) / out_y < 0.4:
@@ -1161,6 +1175,18 @@ def try_discrete_lattice_crop(
     # 交錯／磚縫：軸投影半週期 → 用最近鄰距離校正
     pitch_pts = [(cy, cx) for cy, cx, _ in cents_pitch]
     pitch_x, pitch_y = _correct_half_pitch(pitch_x, pitch_y, pitch_pts)
+    nn_pitch = _nn_median_spacing(pitch_pts)
+    # 絕對／相對下限：過短週期幾乎一定是碎花亞晶格，硬通過會切花
+    min_pitch = max(64.0, float(np.sqrt(max(med_pitch, 1.0))) * 1.5)
+    if nn_pitch >= 40:
+        min_pitch = max(min_pitch, nn_pitch * 0.6)
+    if pitch_x > 0 and pitch_x < min_pitch:
+        # 優先整數倍拉到下限附近
+        mul = max(2, int(np.ceil(min_pitch / max(pitch_x, 1e-6))))
+        pitch_x *= float(mul)
+    if pitch_y > 0 and pitch_y < min_pitch:
+        mul = max(2, int(np.ceil(min_pitch / max(pitch_y, 1e-6))))
+        pitch_y *= float(mul)
     stagger = _detect_stagger(cents_pitch, med_pitch)
     c2x, c2y = _detect_color_period_2x(arr, cents_all, bg, threshold)
     if c2x or c2y:
@@ -1245,9 +1271,12 @@ def try_discrete_lattice_crop(
         return None, "無可用裁切尺寸", 2
 
     coarse: list[tuple[tuple[int, float], int, int, int, int, np.ndarray, str]] = []
+    min_px_i = max(48, int(round(min_pitch)))
     for cw, ch, px, py in size_pairs:
-        # 雙重保險：非整數倍週期直接跳過
+        # 雙重保險：非整數倍週期直接跳過；過短週期禁止硬通過候選
         if cw % px != 0 or ch % py != 0:
+            continue
+        if px < min_px_i or py < min_px_i:
             continue
         step = 2 if max(px, py) >= 90 else 1
         seeds = [
@@ -1440,9 +1469,16 @@ def try_make_discrete_seamless(
             except Exception:
                 px_r = py_r = 0
         key = _rank_tile(cropped, bg, threshold, med, px=px_r, py=py_r)
+        # 過短週期不得硬通過
+        if px_r and py_r and (px_r < 64 or py_r < 64):
+            key = (max(key[0], 1) + 1, key[1] + 80.0)
         candidates.append((key, cropped, f"點綴晶格({detail})"))
         if key[0] == 0:
-            return cropped, f"點綴晶格({detail})"
+            # 接縫明顯差於原圖時不提早返回（避免「切花但色差碰巧過門」）
+            cv, ch = _tile_seam_scores(cropped)
+            ov, oh = _tile_seam_scores(arr)
+            if (cv + ch) <= (ov + oh) * 1.02 + 1.0:
+                return cropped, f"點綴晶格({detail})"
 
     # 僅質心滾動備選（完整性排名，不用邊緣相關）
     if med >= 40:
@@ -1470,8 +1506,24 @@ def try_make_discrete_seamless(
             candidates.append((best_k, best_r, "點綴質心相位"))
 
     candidates.append((_rank_tile(arr, bg, threshold, med), arr.copy(), "原圖"))
-    candidates.sort(key=lambda t: t[0])
-    best_key, best_tile, best_msg = candidates[0]
+    # 接縫相對原圖明顯變差的候選降級（避免硬通過／軟通過切花勝出）
+    ov, oh = _tile_seam_scores(arr)
+    base_seam = ov + oh
+    adjusted: list[tuple[tuple[int, float], np.ndarray, str]] = []
+    for key, tile, msg in candidates:
+        cv, ch = _tile_seam_scores(tile)
+        seam = cv + ch
+        k0, k1 = key
+        if seam > base_seam * 1.15 + 3.0:
+            k0 = max(k0, 1) + 1
+            k1 = k1 + (seam - base_seam) * 1.5
+        elif seam > base_seam and ("晶格" in msg or "質心" in msg):
+            # 任何接縫變差的點綴候選都不得壓過原圖
+            k0 = max(k0, 2)
+            k1 = k1 + (seam - base_seam) * 3.0
+        adjusted.append(((k0, k1), tile, msg))
+    adjusted.sort(key=lambda t: t[0])
+    best_key, best_tile, best_msg = adjusted[0]
 
     if best_key[0] == 0:
         return best_tile, best_msg

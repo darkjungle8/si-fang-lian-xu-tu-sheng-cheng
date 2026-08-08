@@ -759,6 +759,8 @@ def try_period_crop(
                 seam = sv + shs
                 rank = (sc + seam * 0.35, seam, sc)
                 if rank < best_rank and (
+                    seam <= base_seam
+                ) and (
                     sc + 0.15 < base
                     or seam < base_seam * 0.85
                     or seam < base_seam - 10
@@ -1032,9 +1034,9 @@ def try_make_dense_seamless(arr: np.ndarray) -> tuple[np.ndarray, str]:
         csc = structural_edge_score(cropped)
         cv, ch = _tile_seam_scores(cropped)
         crop_seam = cv + ch
-        # 舊門檻 0.45 過嚴：結構降到 0.6× 或接縫總分明顯下降都應採用
-        better_struct = csc < base * 0.85
+        # 結構改善不得以接縫變差為代價（否則 2×2 十字縫更顯眼）
         better_seam = crop_seam < base_seam * 0.80 and crop_seam < base_seam - 8.0
+        better_struct = csc < base * 0.85 and crop_seam <= base_seam
         if better_struct or better_seam:
             return (
                 cropped.copy(),
@@ -1403,9 +1405,14 @@ def make_seamless_hard_cut(
                     > structural_edge_score(arr) * 1.08
                 )
                 if not worse:
+                    filled_key = _integrity_key(filled)
+                    sv0, sh0 = _tile_seam_scores(arr)
+                    svf, shf = _tile_seam_scores(filled)
+                    if (svf + shf) > (sv0 + sh0) + 1.0:
+                        filled_key = (filled_key[0] + 1, filled_key[1] + 50.0)
                     candidates.append(
                         (
-                            _integrity_key(filled),
+                            filled_key,
                             filled,
                             f"點綴未對齊改清邊補花（前景 {ratio:.0%}）",
                         )

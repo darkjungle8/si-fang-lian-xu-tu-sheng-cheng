@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -144,6 +145,35 @@ def test_temu_visual() -> list[dict]:
     return rows
 
 
+def test_prod_8_7() -> list[dict]:
+    """8-7 生產圖代表性壞例：禁止接縫相對原圖變差、禁止過小晶格週期。"""
+    folder = FIXTURES / "prod_8_7"
+    rows: list[dict] = []
+    if not folder.is_dir():
+        print("[SKIP] no prod_8_7 fixtures")
+        return rows
+    for path in sorted(folder.glob("*.png")):
+        row = _run_one(path)
+        errors: list[str] = []
+        v, h = row["unit_seam"]
+        sv, sh = row["src_seam"]
+        if "FAIL" in row["mode"]:
+            errors.append("mode_FAIL")
+        if (v + h) > (sv + sh) + 2.0:
+            errors.append(f"worsened:{sv}+{sh}->{v}+{h}")
+        m = re.search(r"晶格週期\s*(\d+)\s*[×x]\s*(\d+)", row["mode"])
+        if m and (int(m.group(1)) < 64 or int(m.group(2)) < 64):
+            errors.append(f"small_period:{m.group(1)}x{m.group(2)}")
+        row["errors"] = errors
+        row["ok"] = len(errors) == 0
+        rows.append(row)
+        status = "OK" if row["ok"] else "FAIL"
+        print(f"[{status}] {path.name} {sv}+{sh}->{v}+{h} | {row['mode'][:70]}")
+        if errors:
+            print(f"         errors={errors}")
+    return rows
+
+
 def test_half_pitch_helper() -> None:
     """單元測試：最近鄰約 2× 軸向 pitch 時應加倍。"""
     # 磚縫格：軸向投影半週期 70，真實 NN≈140
@@ -165,7 +195,9 @@ def main() -> int:
     rows_a = test_96885088533()
     print("=== temu visual ===")
     rows_b = test_temu_visual()
-    all_rows = rows_a + rows_b
+    print("=== prod_8_7 ===")
+    rows_c = test_prod_8_7()
+    all_rows = rows_a + rows_b + rows_c
     summary = {
         "total": len(all_rows),
         "ok": sum(1 for r in all_rows if r["ok"]),

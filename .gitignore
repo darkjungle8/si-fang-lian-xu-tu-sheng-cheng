@@ -15,6 +15,7 @@ _samples/
 _batch_*/
 _debug_*/
 tests/_out/
+tests/_prod_audit*/
 output/
 pipeline_out/
 *.zip
