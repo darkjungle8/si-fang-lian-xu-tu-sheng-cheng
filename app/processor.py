@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import deque
 from dataclasses import dataclass
 from typing import Sequence
@@ -645,6 +646,119 @@ def _best_phase_for_size(
     return arr[y : y + ch, x : x + cw].copy(), (x, y), best_key[2]
 
 
+def _grid_period_bonus(px: int, py: int, w: int, h: int) -> float:
+    """負值=更優先。同 n 方格週期優於 x/y 各配不同 n 的半週期混搭。"""
+    matched: list[tuple[int, int, int]] = []
+    for n in (4, 5, 6, 7, 8):
+        gx, gy = w // n, h // n
+        if gx < 80 or gy < 80:
+            continue
+        dx, dy = abs(px - gx), abs(py - gy)
+        if dx <= 3 and dy <= 3:
+            matched.append((n, dx, dy))
+    if not matched:
+        return 0.0
+    # 同 n 同時命中 x/y → 最佳（例：313×313 = 4 列格）
+    for n, dx, dy in matched:
+        gx, gy = w // n, h // n
+        if abs(px - gx) <= 3 and abs(py - gy) <= 3:
+            return -25.0 - float(dx + dy)
+    # 只命中單軸或 x/y 來自不同 n → 半週期混搭，略懲罰
+    return 8.0
+
+
+def _axis_join_run_penalty(arr: np.ndarray, axis: int) -> float:
+    """
+    平鋪接縫處若兩側同色 run 合併成 ≈2× 內部典型寬度，視為半週期／錯相位。
+    axis=0 查左右縫；axis=1 查上下縫。回傳懲罰（0=正常，越大越差）。
+    """
+    if arr.ndim == 3:
+        g = arr.astype(np.float64).mean(axis=2)
+    else:
+        g = arr.astype(np.float64)
+    if axis == 0:
+        y0 = g.shape[0] // 2
+        band = g[max(0, y0 - 4) : min(g.shape[0], y0 + 5)].mean(axis=0)
+    else:
+        x0 = g.shape[1] // 2
+        band = g[:, max(0, x0 - 4) : min(g.shape[1], x0 + 5)].mean(axis=1)
+    if band.size < 24:
+        return 0.0
+    thr = 0.5 * (float(band.min()) + float(band.max()))
+    # 對比過低：非條紋／色塊，不懲罰
+    if float(band.max() - band.min()) < 12.0:
+        return 0.0
+    dark = band < thr
+    runs: list[tuple[bool, int]] = []
+    i = 0
+    n = int(dark.size)
+    while i < n:
+        j = i + 1
+        while j < n and bool(dark[j]) == bool(dark[i]):
+            j += 1
+        runs.append((bool(dark[i]), j - i))
+        i = j
+    if len(runs) < 4:
+        return 0.0
+    # 兩端同型才會在平鋪時合併
+    if runs[0][0] != runs[-1][0]:
+        return 0.0
+    joined = runs[0][1] + runs[-1][1]
+    interior = [w for t, w in runs[1:-1] if t == runs[0][0] and w >= 4]
+    if not interior:
+        return 0.0
+    med = float(np.median(np.asarray(interior, dtype=np.float64)))
+    if med < 4.0:
+        return 0.0
+    ratio = joined / med
+    # 正常相位合併應接近 1×；1.65～2.4× 是典型雙倍條紋
+    if 1.65 <= ratio <= 2.45:
+        return 40.0 + 25.0 * abs(ratio - 2.0)
+    if ratio > 2.45:
+        return 20.0 + 8.0 * min(ratio, 4.0)
+    return 0.0
+
+
+def _tile_join_run_penalty(arr: np.ndarray) -> float:
+    """左右＋上下接縫 run 寬度懲罰。"""
+    return _axis_join_run_penalty(arr, 0) + _axis_join_run_penalty(arr, 1)
+
+
+def _looks_like_icon_checkerboard(arr: np.ndarray) -> bool:
+    """不依賴週期字串：邊緣亮度多峰 + 中等能量 → 咖啡格等棋盤圖示。"""
+    energy = _edge_motif_energy(arr)
+    if energy < 2.0 or energy > 8.0:
+        return False
+    band = max(8, int(min(arr.shape[0], arr.shape[1]) * 0.05))
+    g = arr.astype(np.float64).mean(axis=2)
+    edge = np.concatenate(
+        [
+            g[:, :band].ravel(),
+            g[:, -band:].ravel(),
+            g[:band, :].ravel(),
+            g[-band:, :].ravel(),
+        ]
+    )
+    hist, _ = np.histogram(edge, bins=8, range=(0, 255))
+    peaks = int(np.sum(hist > hist.max() * 0.35))
+    return peaks >= 3
+
+
+def _is_icon_grid_tile(arr: np.ndarray, detail: str, w: int, h: int) -> bool:
+    """
+    圖示／棋盤格（咖啡格等）：必須同時滿足
+    1) 週期落在同 n 的方格 w//n×h//n
+    2) 邊緣亮度直方圖多峰（棋盤格特徵）
+    """
+    if not _looks_like_icon_checkerboard(arr):
+        return False
+    m = re.search(r"週期\s*(\d+)\s*[×x]\s*(\d+)", detail)
+    if not m:
+        return True  # 影像像棋盤格，即使尚未寫出週期
+    px, py = int(m.group(1)), int(m.group(2))
+    return _grid_period_bonus(px, py, w, h) <= -20.0
+
+
 def try_period_crop(
     arr: np.ndarray,
     bg: Sequence[int] | None = None,
@@ -711,31 +825,66 @@ def try_period_crop(
         return None, "未偵測到週期"
 
     # 全解析度自相關強峰（縮圖常漏掉接近半幅的真週期，如 250 on 627）
+    # 下限勿過高：條紋基本週期常 < 12% 寬（例 88 on 1231）
     full_gray = _luminance_map(arr)
     full_x: list[int] = []
     full_y: list[int] = []
     for p, score in _autocorr_best_periods(
         full_gray.mean(1), max(16, h // 40), h // 2, top_k=5
     ):
-        if score >= 0.25 and h * 0.12 <= p <= h * 0.48:
+        if score >= 0.25 and h * 0.05 <= p <= h * 0.48:
             full_y.extend([int(p), int(round(p / 2))])
     for p, score in _autocorr_best_periods(
         full_gray.mean(0), max(16, w // 40), w // 2, top_k=5
     ):
-        if score >= 0.25 and w * 0.12 <= p <= w * 0.48:
+        if score >= 0.25 and w * 0.05 <= p <= w * 0.48:
             full_x.extend([int(p), int(round(p / 2))])
     # 強峰置頂，再接縮圖候選
     xs = list(dict.fromkeys([*full_x, *xs]))
     ys = list(dict.fromkeys([*full_y, *ys]))
-    xs = [p for p in xs if 16 <= p <= w // 2][:20]
-    ys = [p for p in ys if 16 <= p <= h // 2][:20]
+    # 圖標／棋盤格：優先試整除格寬（咖啡杯格常是 4–8 列）
+    grid_px: list[int] = []
+    grid_py: list[int] = []
+    for n in (4, 5, 6, 7, 8):
+        gx, gy = w // n, h // n
+        if 80 <= gx <= w // 2:
+            grid_px.append(gx)
+        if 80 <= gy <= h // 2:
+            grid_py.append(gy)
+    xs = list(dict.fromkeys([*grid_px, *xs]))
+    ys = list(dict.fromkeys([*grid_py, *ys]))
+    # 僅在真像棋盤／高邊緣圖示能量時走圖示格捷徑。
+    # 不可用 len(grid_px)>=2：幾乎所有大圖都有 w//4..w//8，會把直條紋誤判成格點。
+    icon_grid_likely = _looks_like_icon_checkerboard(arr) or _edge_motif_energy(arr) >= 3.0
+    if icon_grid_likely:
+        xs = list(dict.fromkeys([*grid_px, *xs[:8]]))[:12]
+        ys = list(dict.fromkeys([*grid_py, *ys[:8]]))[:12]
+    else:
+        xs = [p for p in xs if 16 <= p <= w // 2][:20]
+        ys = [p for p in ys if 16 <= p <= h // 2][:20]
 
     best_tile: np.ndarray | None = None
     best_rank = (base + base_seam * 0.35, base_seam, base)
     best_detail = ""
 
+    period_pairs: list[tuple[int, int]] = []
+    if icon_grid_likely:
+        for n in (4, 5, 6, 7, 8):
+            gx, gy = w // n, h // n
+            if 80 <= gx <= w // 2 and 80 <= gy <= h // 2 and abs(gx - gy) <= 4:
+                period_pairs.append((gx, gy))
+        period_pairs = list(dict.fromkeys(period_pairs))
     for px in xs[:12]:
         for py in ys[:12]:
+            period_pairs.append((px, py))
+    period_pairs = list(dict.fromkeys(period_pairs))
+    if icon_grid_likely and period_pairs:
+        # 圖示格：先只試方格週期，命中後可提早結束
+        grid_only = [p for p in period_pairs if _grid_period_bonus(p[0], p[1], w, h) <= -20.0]
+        if grid_only:
+            period_pairs = grid_only + [p for p in period_pairs if p not in grid_only]
+
+    for px, py in period_pairs:
             # 試最大與次大整數倍：剛好整除時 max 倍無法做相位偏移
             nmax = w // px
             mmax = h // py
@@ -757,13 +906,34 @@ def try_period_crop(
                 tile, off, sc = _best_phase_for_size(arr, cw, ch, px, py)
                 sv, shs = _tile_seam_scores(tile)
                 seam = sv + shs
-                rank = (sc + seam * 0.35, seam, sc)
+                join_pen = _tile_join_run_penalty(tile)
+                # 雙倍條紋等錯相位：直接淘汰，避免低色差假勝利
+                if join_pen >= 40.0:
+                    continue
+                bonus = _grid_period_bonus(px, py, w, h) if icon_grid_likely else 0.0
+                phase_pen = 0.0
+                if bonus <= -20.0:
+                    # 棋盤格：相位應靠近格線，禁止切在格子中間
+                    rx, ry = off[0] % max(px, 1), off[1] % max(py, 1)
+                    rx = min(rx, px - rx)
+                    ry = min(ry, py - ry)
+                    phase_pen = float(rx + ry) * 0.55
+                rank = (
+                    sc + seam * 0.35 + bonus + phase_pen + join_pen,
+                    seam,
+                    sc,
+                )
+                # 候選可暫收下中等色差；最終是否採用由 try_make_dense + 色差均衡決定
+                if seam > 95.0 or max(sv, shs) > 70.0:
+                    continue
+                grid_ok = bonus <= -20.0 and phase_pen <= 12.0
                 if rank < best_rank and (
                     seam <= base_seam
                 ) and (
                     sc + 0.15 < base
                     or seam < base_seam * 0.85
                     or seam < base_seam - 10
+                    or (grid_ok and seam <= base_seam * 0.98)
                 ):
                     best_rank = rank
                     best_tile = tile
@@ -871,6 +1041,236 @@ def _tile_seam_scores(arr: np.ndarray) -> tuple[float, float]:
     return v, hh
 
 
+def flatten_illumination(arr: np.ndarray, radius: int | None = None) -> np.ndarray:
+    """去掉大範圍光照／拍攝色溫梯度，保留紋理細節。"""
+    h, w = arr.shape[:2]
+    if radius is None:
+        radius = max(24, min(h, w) // 6)
+    blur = np.asarray(
+        Image.fromarray(arr).filter(ImageFilter.GaussianBlur(radius=radius)),
+        dtype=np.float64,
+    )
+    a = arr.astype(np.float64)
+    mean = a.mean(axis=(0, 1), keepdims=True)
+    return np.clip(a - blur + mean, 0, 255).astype(np.uint8)
+
+
+def soft_edge_midpoint(
+    arr: np.ndarray,
+    *,
+    band_frac: float = 0.05,
+    strength: float = 0.45,
+    structure_safe: bool = False,
+) -> np.ndarray:
+    """
+    對邊邊緣帶向中點靠攏，消除可視色帶／十字縫色差。
+    strength 過高會糊邊；生產預設約 0.45。
+    structure_safe：僅在對邊都較平坦時混合（避免圖示重影）。
+    """
+    h, w = arr.shape[:2]
+    band = max(8, int(min(h, w) * band_frac))
+    out = arr.astype(np.float64).copy()
+    if structure_safe:
+        g = out.mean(axis=2)
+        # 邊緣結構強度：局部梯度
+        gx = np.abs(np.diff(g, axis=1, prepend=g[:, :1]))
+        gy = np.abs(np.diff(g, axis=0, prepend=g[:1, :]))
+        struct = gx + gy
+    for i in range(band):
+        t = 1.0 - i / float(band)
+        alpha = strength * t * t
+        mid = 0.5 * (out[:, i] + out[:, w - 1 - i])
+        if structure_safe:
+            # 兩側都平坦才允許混合
+            s = np.maximum(struct[:, i], struct[:, w - 1 - i])
+            a = alpha * (s < 18.0).astype(np.float64)[:, None]
+            out[:, i] = (1.0 - a) * out[:, i] + a * mid
+            out[:, w - 1 - i] = (1.0 - a) * out[:, w - 1 - i] + a * mid
+        else:
+            out[:, i] = (1.0 - alpha) * out[:, i] + alpha * mid
+            out[:, w - 1 - i] = (1.0 - alpha) * out[:, w - 1 - i] + alpha * mid
+    for i in range(band):
+        t = 1.0 - i / float(band)
+        alpha = strength * t * t
+        mid = 0.5 * (out[i] + out[h - 1 - i])
+        if structure_safe:
+            s = np.maximum(struct[i], struct[h - 1 - i])
+            a = alpha * (s < 18.0).astype(np.float64)[:, None]
+            out[i] = (1.0 - a) * out[i] + a * mid
+            out[h - 1 - i] = (1.0 - a) * out[h - 1 - i] + a * mid
+        else:
+            out[i] = (1.0 - alpha) * out[i] + alpha * mid
+            out[h - 1 - i] = (1.0 - alpha) * out[h - 1 - i] + alpha * mid
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def _edge_motif_energy(arr: np.ndarray, band_frac: float = 0.05) -> float:
+    """邊緣帶高頻能量：圖示／線條多時 soft 對齊易出重影。"""
+    h, w = arr.shape[:2]
+    band = max(8, int(min(h, w) * band_frac))
+    g = arr.astype(np.float64).mean(axis=2)
+    parts = (
+        np.abs(np.diff(g[:, :band], axis=0)),
+        np.abs(np.diff(g[:, -band:], axis=0)),
+        np.abs(np.diff(g[:band, :], axis=1)),
+        np.abs(np.diff(g[-band:, :], axis=1)),
+    )
+    return float(np.percentile(np.concatenate([p.ravel() for p in parts]), 90))
+
+
+def _soft_blend_ghosts(
+    orig: np.ndarray,
+    soft: np.ndarray,
+    *,
+    band_frac: float = 0.05,
+) -> bool:
+    """
+    對邊 soft 混合是否把對側圖示「印」進本側邊緣（咖啡／圖標格常見重影）。
+    """
+    h, w = orig.shape[:2]
+    band = max(8, int(min(h, w) * band_frac))
+    o = orig.astype(np.float64)
+    s = soft.astype(np.float64)
+
+    def _side_ghost(a0: np.ndarray, a1: np.ndarray, b0: np.ndarray) -> float:
+        toward = a1 - a0
+        delta = b0 - a0
+        mag = np.linalg.norm(toward, axis=2)
+        mask = mag > 14.0
+        if not np.any(mask):
+            return 0.0
+        cos = np.sum(delta * toward, axis=2) / (
+            np.linalg.norm(delta, axis=2) * mag + 1e-6
+        )
+        return float(np.mean(np.clip(cos[mask], 0.0, 1.0)) * np.mean(np.abs(delta)[mask]))
+
+    g = max(
+        _side_ghost(o[:, :band], o[:, -band:], s[:, :band]),
+        _side_ghost(o[:, -band:], o[:, :band], s[:, -band:]),
+        _side_ghost(o[:band], o[-band:], s[:band]),
+        _side_ghost(o[-band:], o[:band], s[-band:]),
+    )
+    # 邊緣本就有圖示結構時，門檻更嚴
+    energy = _edge_motif_energy(orig, band_frac=band_frac)
+    return g > (2.0 if energy >= 5.0 else 6.0)
+
+
+def equalize_seam_colors(arr: np.ndarray) -> np.ndarray:
+    """色差修復：去光照梯度 + 對邊柔和對齊。"""
+    return soft_edge_midpoint(flatten_illumination(arr))
+
+
+def equalize_edge_means(
+    arr: np.ndarray,
+    *,
+    band_frac: float = 0.04,
+) -> np.ndarray:
+    """
+    只對齊對邊邊緣帶的顏色均值／方差（不做像素混合），避免圖示重影。
+    """
+    h, w = arr.shape[:2]
+    band = max(6, int(min(h, w) * band_frac))
+    out = arr.astype(np.float64).copy()
+
+    def _match(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        ma = a.mean(axis=(0, 1), keepdims=True)
+        mb = b.mean(axis=(0, 1), keepdims=True)
+        mid = 0.5 * (ma + mb)
+        sa = a.std(axis=(0, 1), keepdims=True) + 1e-6
+        sb = b.std(axis=(0, 1), keepdims=True) + 1e-6
+        smid = 0.5 * (sa + sb)
+        a2 = (a - ma) * (smid / sa) + mid
+        b2 = (b - mb) * (smid / sb) + mid
+        return a2, b2
+
+    # 左右
+    for i in range(band):
+        t = 1.0 - i / float(band)
+        t = t * t
+        L = out[:, i : i + 1]
+        R = out[:, w - 1 - i : w - i]
+        L2, R2 = _match(L, R)
+        out[:, i : i + 1] = (1.0 - t) * L + t * L2
+        out[:, w - 1 - i : w - i] = (1.0 - t) * R + t * R2
+    # 上下
+    for i in range(band):
+        t = 1.0 - i / float(band)
+        t = t * t
+        T = out[i : i + 1]
+        B = out[h - 1 - i : h - i]
+        T2, B2 = _match(T, B)
+        out[i : i + 1] = (1.0 - t) * T + t * T2
+        out[h - 1 - i : h - i] = (1.0 - t) * B + t * B2
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def maybe_equalize_seam_colors(
+    arr: np.ndarray,
+    *,
+    min_improve: float = 2.0,
+    ratio: float = 0.92,
+) -> tuple[np.ndarray, str]:
+    """
+    若色差均衡能實質降低對邊色差則採用，否則原樣返回。
+    高接縫時會加大對齊強度並可多輪，直到落到可視可接受範圍或無再改善。
+    邊緣有圖示結構時禁止強 soft（避免接縫重影）。
+    """
+    v0, h0 = _tile_seam_scores(arr)
+    s0 = v0 + h0
+    if s0 < 8.0:
+        return arr, ""
+
+    motif_edge = _edge_motif_energy(arr) >= 3.0
+    best_arr = arr
+    best_s = s0
+    label = "色差對齊"
+
+    # 圖示邊緣：優先均值對齊（無重影），再試極弱 soft
+    mean_eq = equalize_edge_means(arr)
+    mild = soft_edge_midpoint(arr, strength=0.18, band_frac=0.02)
+    first_pass: list[tuple[str, np.ndarray]] = [
+        ("邊緣均值對齊", mean_eq),
+        ("色差弱對齊", mild),
+    ]
+    if not motif_edge:
+        first_pass.extend(
+            (
+                ("色差均衡", equalize_seam_colors(arr)),
+                ("色差對齊", soft_edge_midpoint(arr, strength=0.5)),
+            )
+        )
+
+    for name, cand in first_pass:
+        if _soft_blend_ghosts(arr, cand):
+            continue
+        v, h = _tile_seam_scores(cand)
+        s = v + h
+        if s <= s0 * ratio and s <= s0 - min_improve and s < best_s:
+            best_arr, best_s, label = cand, s, name
+
+    # 仍偏高：加強／加寬邊緣帶多輪對齊（專門壓可視色帶）；圖示格跳過
+    if best_s > 22.0 and not motif_edge:
+        cur = best_arr
+        for strength, band in ((0.62, 0.06), (0.78, 0.08), (0.88, 0.10), (0.95, 0.12)):
+            cand = soft_edge_midpoint(cur, band_frac=band, strength=strength)
+            if _soft_blend_ghosts(arr, cand, band_frac=band):
+                break
+            v, h = _tile_seam_scores(cand)
+            s = v + h
+            if s < best_s - 0.8:
+                cur, best_s = cand, s
+                best_arr = cur
+                label = "色差強化對齊"
+            if best_s <= 18.0 and max(v, h) <= 14.0:
+                break
+
+    if best_s >= s0 - min_improve and best_s > s0 * ratio:
+        return arr, ""
+
+    v1, h1 = _tile_seam_scores(best_arr)
+    return best_arr, f"{label} {v0:.0f}+{h0:.0f}→{v1:.0f}+{h1:.0f}"
+
+
 def _edge_profile_corr(arr: np.ndarray) -> tuple[float, float]:
     """左右／上下邊緣亮度剖面相關（1=對齊好）。"""
     lum = arr.astype(np.float64).mean(axis=2)
@@ -895,22 +1295,40 @@ def _offset_mincut_axis(
     axis: int,
     ov: int,
     lim: int,
+    *,
+    prefer_flat: bool = False,
 ) -> tuple[np.ndarray, int]:
     """
     沿 axis 半幅偏移後，在中央重疊帶做 min-cut 硬切。
     不滾動半幅本體，以保留外緣=原圖中心相鄰像素（四方連續保證）。
+    prefer_flat：代價加上局部梯度，迫使切割走平坦底色（避免切斷咖啡格圖示）。
     """
     del lim  # 外緣連續優先，不再用半幅錯位
     h, w = arr.shape[:2]
+
+    def _err_map(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """a/b: (..., band, 3) → (length, band) 代價。"""
+        af = a.astype(np.float64)
+        bf = b.astype(np.float64)
+        err = np.mean(np.abs(af - bf), axis=2)
+        if prefer_flat:
+            # 兩側平均圖的梯度高 → 代價高（寧可切在平坦格底）
+            mid = 0.5 * (af + bf)
+            lum = mid.mean(axis=2)
+            if lum.ndim == 2 and lum.shape[1] >= 2:
+                g = np.abs(np.diff(lum, axis=1, prepend=lum[:, :1]))
+                g = g + np.abs(np.diff(lum, axis=0, prepend=lum[:1, :]))
+            else:
+                g = np.zeros_like(err)
+            err = err + 1.35 * g
+        return err
+
     if axis == 1:
         mid = w // 2
         out = np.roll(arr, mid, axis=1)
         left_ov = out[:, mid - ov : mid]
         right_ov = out[:, mid : mid + ov]
-        err = np.mean(
-            np.abs(left_ov.astype(np.float64) - right_ov.astype(np.float64)),
-            axis=2,
-        )
+        err = _err_map(left_ov, right_ov)
         cut = _min_cut_path(err)
         for y in range(h):
             j = int(cut[y])
@@ -922,10 +1340,7 @@ def _offset_mincut_axis(
     out = np.roll(arr, mid, axis=0)
     top_ov = out[mid - ov : mid]
     bot_ov = out[mid : mid + ov]
-    err = np.mean(
-        np.abs(top_ov.astype(np.float64) - bot_ov.astype(np.float64)),
-        axis=2,
-    ).T
+    err = _err_map(top_ov, bot_ov).T
     cut = _min_cut_path(err)
     for x in range(w):
         j = int(cut[x])
@@ -944,13 +1359,49 @@ def offset_quilt_seamless(arr: np.ndarray) -> tuple[np.ndarray, str]:
     base_v, base_h = _tile_seam_scores(arr)
     base_cv, base_ch = _edge_profile_corr(arr)
     base_rank = _seam_rank(arr)
+    iconish = _looks_like_icon_checkerboard(arr)
     ov = max(80, min(h, w) // 10)
+    if iconish:
+        # 圖示格：加寬重疊帶，讓切割有機會繞開杯子／豆子
+        ov = max(ov, min(h, w) // 6)
 
     # 純半幅偏移：外緣=原圖中心相鄰像素，四方連續有數學保證
     pure = np.roll(np.roll(arr, w // 2, axis=1), h // 2, axis=0)
 
-    cur, _ = _offset_mincut_axis(arr, axis=1, ov=ov, lim=0)
-    cur, _ = _offset_mincut_axis(cur, axis=0, ov=ov, lim=0)
+    # 圖示格：min-cut 即使「平切」仍常切斷格子；純偏移外緣已連續。
+    # 先對原圖邊緣做均值對齊，再滾動，把殘餘色差留在單元中央且較淡。
+    if iconish:
+        pre = equalize_edge_means(flatten_illumination(arr), band_frac=0.06)
+        pure_pre = np.roll(np.roll(pre, w // 2, axis=1), h // 2, axis=0)
+        # 外緣改回「未 soft 的純滾」中心相鄰列，保住四方連續
+        edge = max(2, min(8, ov // 20))
+        pure_pre[:, :edge] = pure[:, :edge]
+        pure_pre[:, -edge:] = pure[:, -edge:]
+        pure_pre[:edge, :] = pure[:edge, :]
+        pure_pre[-edge:, :] = pure[-edge:, :]
+        v, hs = _tile_seam_scores(pure_pre)
+        cv, ch = _edge_profile_corr(pure_pre)
+        if _seam_rank(pure_pre) <= base_rank * 0.95 or (cv + ch) >= (base_cv + base_ch) + 0.2:
+            return (
+                pure_pre,
+                f"半幅偏移拼接（純滾）（接縫 {base_v:.0f}+{base_h:.0f}→{v:.0f}+{hs:.0f}，"
+                f"邊緣相關 {base_cv:.2f}/{base_ch:.2f}→{cv:.2f}/{ch:.2f}）",
+            )
+        v, hs = _tile_seam_scores(pure)
+        cv, ch = _edge_profile_corr(pure)
+        if _seam_rank(pure) <= base_rank * 0.95 or (cv + ch) >= (base_cv + base_ch) + 0.2:
+            return (
+                pure,
+                f"半幅偏移拼接（純滾）（接縫 {base_v:.0f}+{base_h:.0f}→{v:.0f}+{hs:.0f}，"
+                f"邊緣相關 {base_cv:.2f}/{base_ch:.2f}→{cv:.2f}/{ch:.2f}）",
+            )
+        return (
+            arr.copy(),
+            f"拼接無改善（原接縫 {base_v:.0f}+{base_h:.0f}）",
+        )
+
+    cur, _ = _offset_mincut_axis(arr, axis=1, ov=ov, lim=0, prefer_flat=False)
+    cur, _ = _offset_mincut_axis(cur, axis=0, ov=ov, lim=0, prefer_flat=False)
     # 縫合可能動到外緣，強制恢復純偏移的外緣帶，保住 2×2 拼縫
     edge = max(2, min(8, ov // 20))
     cur[:, :edge] = pure[:, :edge]
@@ -971,9 +1422,10 @@ def offset_quilt_seamless(arr: np.ndarray) -> tuple[np.ndarray, str]:
             arr.copy(),
             f"拼接無改善（原接縫 {base_v:.0f}+{base_h:.0f}）",
         )
+    tag = "半幅偏移拼接（平切）" if iconish else "半幅偏移拼接"
     return (
         cur,
-        f"半幅偏移拼接（接縫 {base_v:.0f}+{base_h:.0f}→{v:.0f}+{hs:.0f}，"
+        f"{tag}（接縫 {base_v:.0f}+{base_h:.0f}→{v:.0f}+{hs:.0f}，"
         f"邊緣相關 {base_cv:.2f}/{base_ch:.2f}→{cv:.2f}/{ch:.2f}）",
     )
 
@@ -1024,30 +1476,209 @@ def try_make_dense_seamless(arr: np.ndarray) -> tuple[np.ndarray, str]:
     """
     滿鋪紋：單元圖優先保留原圖（或穩定週期裁切）。
     斜紋對齊改在 2×2 用多圖錯位拼接完成，不在單張上半幅偏移。
+    最後以色差均衡壓低對邊色帶。
     """
     base = structural_edge_score(arr)
     base_v, base_h = _tile_seam_scores(arr)
     base_seam = base_v + base_h
 
+    best = arr.copy()
+    best_detail = (
+        f"保留原圖（接縫 {base_v:.0f}+{base_h:.0f}；2×2 用多圖錯位拼接對齊）"
+    )
+    best_seam = base_seam
+
+    h, w = arr.shape[:2]
     cropped, detail = try_period_crop(arr)
     if cropped is not None:
         csc = structural_edge_score(cropped)
         cv, ch = _tile_seam_scores(cropped)
         crop_seam = cv + ch
-        # 結構改善不得以接縫變差為代價（否則 2×2 十字縫更顯眼）
-        better_seam = crop_seam < base_seam * 0.80 and crop_seam < base_seam - 8.0
-        better_struct = csc < base * 0.85 and crop_seam <= base_seam
+        icon_crop = _is_icon_grid_tile(cropped, detail, w, h)
+        # 非圖示格：裁切不得比原圖更差（錯誤週期常把指標與可視一起拉壞）
+        if not icon_crop and crop_seam >= base_seam * 0.95:
+            cropped = None
+    if cropped is not None:
+        csc = structural_edge_score(cropped)
+        cv, ch = _tile_seam_scores(cropped)
+        crop_seam = cv + ch
+        icon_crop = _is_icon_grid_tile(cropped, detail, w, h)
+        abs_ok = crop_seam <= 38.0 and max(cv, ch) <= 30.0
+        better_seam = (
+            abs_ok
+            and crop_seam < base_seam * 0.80
+            and crop_seam < base_seam - 8.0
+        )
+        better_struct = abs_ok and csc < base * 0.85 and crop_seam <= base_seam
         if better_struct or better_seam:
-            return (
-                cropped.copy(),
+            best = cropped.copy()
+            best_detail = (
                 f"週期裁切 {detail}（接縫 {base_v:.0f}+{base_h:.0f}→{cv:.0f}+{ch:.0f}；"
-                "2×2 再多圖錯位拼接）",
+                "2×2 再多圖錯位拼接）"
             )
+            best_seam = crop_seam
+        elif crop_seam < best_seam and crop_seam <= base_seam:
+            # 圖示格：純週期裁切，不做 soft 色差（會把對邊杯子印成重影）
+            # 裁切後接縫仍極高 → 不採用（寧可原圖+對齊）
+            if (
+                icon_crop
+                and crop_seam < base_seam * 0.85
+                and crop_seam <= 85.0
+                and max(cv, ch) <= 50.0
+            ):
+                # 圖示格：週期裁切 vs 原圖，選結構安全拋光後接縫更好者
+                mean_crop = equalize_edge_means(cropped)
+                safe_crop = soft_edge_midpoint(
+                    mean_crop, strength=0.55, band_frac=0.06, structure_safe=True
+                )
+                mean_keep = equalize_edge_means(arr)
+                safe_keep = soft_edge_midpoint(
+                    mean_keep, strength=0.55, band_frac=0.06, structure_safe=True
+                )
+                candidates_ig = [
+                    ("週期裁切", cropped, crop_seam),
+                    ("週期+安全對齊", safe_crop, sum(_tile_seam_scores(safe_crop))),
+                    ("原圖+安全對齊", safe_keep, sum(_tile_seam_scores(safe_keep))),
+                ]
+                # 禁止重影
+                candidates_ig = [
+                    (n, a, s)
+                    for n, a, s in candidates_ig
+                    if not _soft_blend_ghosts(arr if "原圖" in n else cropped, a)
+                ]
+                if candidates_ig:
+                    name, tile, seam = min(candidates_ig, key=lambda t: t[2])
+                    if seam < best_seam:
+                        best = tile
+                        best_seam = seam
+                        tv, th = _tile_seam_scores(tile)
+                        best_detail = (
+                            f"{name} {detail}（接縫 {base_v:.0f}+{base_h:.0f}"
+                            f"→{tv:.0f}+{th:.0f}；圖示格免色差）"
+                        )
+            elif not icon_crop:
+                # 結構改善但色差仍偏高：先收下，後面色差均衡再壓
+                eq, eq_msg = maybe_equalize_seam_colors(cropped)
+                ev, eh = _tile_seam_scores(eq)
+                eq_seam = ev + eh
+                if eq_seam <= 38.0 and max(ev, eh) <= 30.0 and eq_seam < best_seam:
+                    best = eq
+                    best_detail = (
+                        f"週期裁切+色差 {detail}（接縫 {base_v:.0f}+{base_h:.0f}"
+                        f"→{cv:.0f}+{ch:.0f}→{ev:.0f}+{eh:.0f}"
+                        f"{('；' + eq_msg) if eq_msg else ''}）"
+                    )
+                    best_seam = eq_seam
 
-    return (
-        arr.copy(),
-        f"保留原圖（接縫 {base_v:.0f}+{base_h:.0f}；2×2 用多圖錯位拼接對齊）",
-    )
+    # 保留原圖且接縫仍高：去光照梯度 → 弱對齊 →（可選）半幅偏移
+    # 棋盤圖示格：允許「平切」半幅偏移（切割偏好地色），禁止舊式硬切撕格
+    if "保留原圖" in best_detail and best_seam > 26.0:
+        icon_grid = _looks_like_icon_checkerboard(best) or _is_icon_grid_tile(
+            best, best_detail, w, h
+        )
+        flat = flatten_illumination(best)
+        fv, fh = _tile_seam_scores(flat)
+        if fv + fh < best_seam - 1.5:
+            eq, eq_msg = maybe_equalize_seam_colors(flat)
+            ev, eh = _tile_seam_scores(eq)
+            if ev + eh < best_seam - 2.0 and not _soft_blend_ghosts(flat, eq):
+                best = eq
+                best_seam = ev + eh
+                best_detail = (
+                    f"去光照 {best_detail}"
+                    f"{('；' + eq_msg) if eq_msg else ''}"
+                )
+        # 圖示格與一般滿鋪都可試半幅偏移；圖示格走 prefer_flat 平切
+        aligned, ad = stitch_align_seamless(best)
+        av, ah = _tile_seam_scores(aligned)
+        # 圖示格：必須大幅改善，且邊緣相關要夠高（否則寧可不撕）
+        if icon_grid:
+            cv2, ch2 = _edge_profile_corr(aligned)
+            ok_icon = (
+                av + ah < best_seam * 0.45
+                and av + ah <= 22.0
+                and max(av, ah) <= 14.0
+                and cv2 >= 0.85
+                and ch2 >= 0.85
+            )
+            if ok_icon:
+                best = aligned
+                best_seam = av + ah
+                best_detail = f"邊緣對齊 {ad}；{best_detail}"
+        elif av + ah < best_seam - 2.0:
+            best = aligned
+            best_seam = av + ah
+            best_detail = f"邊緣對齊 {ad}；{best_detail}"
+            # 半幅偏移後禁止 soft 混合，只做均值對齊
+            mean2 = equalize_edge_means(best, band_frac=0.05)
+            ev2, eh2 = _tile_seam_scores(mean2)
+            if ev2 + eh2 < best_seam - 1.0 and not _soft_blend_ghosts(best, mean2):
+                best = mean2
+                best_seam = ev2 + eh2
+                best_detail = (
+                    f"{best_detail}；邊緣均值對齊 "
+                    f"{av:.0f}+{ah:.0f}→{ev2:.0f}+{eh2:.0f}"
+                )
+
+    return best, best_detail
+
+
+def _finalize_unit(arr: np.ndarray, detail: str) -> tuple[Image.Image, str]:
+    """最終色差拋光（滿鋪／點綴共用出口）。"""
+    iconish = ("圖示格免色差" in detail) or _looks_like_icon_checkerboard(arr)
+    # 半幅偏移後外緣已連續：禁止 soft 混合（會把不相鄰內容印壞，造成「切斷」假象）
+    # 僅允許均值／方差對齊壓殘餘色帶
+    if "半幅偏移" in detail:
+        v0, h0 = _tile_seam_scores(arr)
+        if v0 + h0 <= 22.0 and max(v0, h0) <= 16.0:
+            return Image.fromarray(arr, mode="RGB"), detail
+        mean_eq = equalize_edge_means(arr, band_frac=0.05)
+        v1, h1 = _tile_seam_scores(mean_eq)
+        if v1 + h1 < v0 + h0 - 1.0 and not _soft_blend_ghosts(arr, mean_eq):
+            detail = f"{detail}；邊緣均值對齊 {v0:.0f}+{h0:.0f}→{v1:.0f}+{h1:.0f}"
+            return Image.fromarray(mean_eq, mode="RGB"), detail
+        return Image.fromarray(arr, mode="RGB"), detail
+    if iconish:
+        # 圖示格：去光照 + 均值對齊 + 結構安全 soft（只糊平坦底色）
+        flat = flatten_illumination(arr, radius=max(32, min(arr.shape[0], arr.shape[1]) // 4))
+        mean_eq = equalize_edge_means(flat)
+        safe = soft_edge_midpoint(mean_eq, strength=0.72, band_frac=0.08, structure_safe=True)
+        v0, h0 = _tile_seam_scores(arr)
+        best, best_s, label = arr, v0 + h0, ""
+        for name, cand in (
+            ("去光照均值", mean_eq),
+            ("結構安全對齊", safe),
+        ):
+            # 結構安全路徑：ghost 門檻放寬（平坦底色混合不應算重影）
+            if name != "結構安全對齊" and _soft_blend_ghosts(arr, cand):
+                continue
+            # 結構安全仍可能把圖示印淡：若偵測到重影則跳過
+            if name == "結構安全對齊" and _soft_blend_ghosts(arr, cand):
+                continue
+            v, h = _tile_seam_scores(cand)
+            if v + h < best_s - 1.0:
+                best, best_s, label = cand, v + h, name
+        if label:
+            v1, h1 = _tile_seam_scores(best)
+            detail = f"{detail}；{label} {v0:.0f}+{h0:.0f}→{v1:.0f}+{h1:.0f}"
+            return Image.fromarray(best, mode="RGB"), detail
+        return Image.fromarray(arr, mode="RGB"), detail
+    eq, msg = maybe_equalize_seam_colors(arr)
+    if msg and _soft_blend_ghosts(arr, eq):
+        return Image.fromarray(arr, mode="RGB"), detail
+    if msg:
+        detail = f"{detail}；{msg}"
+        arr = eq
+    # 清邊／點綴後仍偏高：再試一輪結構安全 soft（只糊平坦區）
+    v0, h0 = _tile_seam_scores(arr)
+    if v0 + h0 > 14.0 or max(v0, h0) > 10.0:
+        safe = soft_edge_midpoint(arr, strength=0.55, band_frac=0.06, structure_safe=True)
+        if not _soft_blend_ghosts(arr, safe):
+            v1, h1 = _tile_seam_scores(safe)
+            if v1 + h1 < v0 + h0 - 1.0:
+                detail = f"{detail}；結構安全對齊 {v0:.0f}+{h0:.0f}→{v1:.0f}+{h1:.0f}"
+                return Image.fromarray(safe, mode="RGB"), detail
+    return Image.fromarray(arr, mode="RGB"), detail
 
 
 def tile_2x2_multi(
@@ -1084,9 +1715,14 @@ def tile_2x2_multi(
             (w, h),
         )
 
-    # 邊緣剖面相關高 → 單元已對齊，規則點綴勿再錯位
+    # 邊緣剖面相關高且對邊色差低 → 直接拼接；僅相關高但色差仍大時走錯位
     cv, ch = _edge_profile_corr(arr)
-    if prefer_plain or (cv >= 0.85 and ch >= 0.85):
+    plain_sum = plain_v + plain_h
+    if prefer_plain or (cv >= 0.85 and ch >= 0.85 and plain_sum <= 18.0):
+        return _plain()
+    # 半幅偏移單元：外緣來自原圖中心相鄰列，高頻紋理會讓 plain_sum 偏高，
+    # 但可視上連續；相關尚可時優先直接拼接，避免錯位補白造假縫
+    if cv >= 0.50 and ch >= 0.50 and plain_sum <= 80.0:
         return _plain()
 
     # 疏點綴（花圈／碎花）：錯位緊挨補白會打亂晶格節奏，看起來像接縫空一截
@@ -1206,7 +1842,23 @@ def tile_2x2_multi(
         _, canvas, shift, mv, mh = candidates_h[0]
         pick = ("H", shift, canvas, mv, mh)
 
-    if pick is None or (pick[3] + pick[4]) >= (plain_v + plain_h) * 0.90:
+    if pick is None or (pick[3] + pick[4]) >= plain_sum * 0.90:
+        # 錯位無明顯收益：僅在直接拼接本身可接受時才用 plain
+        if plain_sum <= 22.0 and max(plain_v, plain_h) <= 16.0:
+            return _plain()
+        # 否則仍用錯位結果（寧可保留較高中縫，避免 plain 爆出十字縫）
+        if pick is not None:
+            axis, shift, canvas, mv, mh = pick
+            empty = np.all(canvas == 0, axis=2)
+            if np.any(empty):
+                canvas = canvas.copy()
+                canvas[empty] = np.median(arr.reshape(-1, 3), axis=0).astype(np.uint8)
+            return (
+                Image.fromarray(canvas, mode="RGB"),
+                f"2x2 錯位後緊挨補白 {axis}={shift} "
+                f"（中縫 {plain_v:.0f}+{plain_h:.0f}→{mv:.0f}+{mh:.0f}）",
+                (w, h),
+            )
         return _plain()
 
     # 拒單軸「假修好」：一軸暴跌、另一軸幾乎沒動 → 棋盤等會拼出雙列同色
@@ -1336,12 +1988,14 @@ def make_seamless_hard_cut(
         )
 
         unit_d, detail_d = try_make_discrete_seamless(arr, bg, threshold)
-        if "FAIL" not in detail_d:
-            return (
-                Image.fromarray(unit_d, mode="RGB"),
+        # 僅硬通過直接採用。軟通過（常是「原圖 cuts=0」）若提前 return，
+        # 會蓋掉明顯更好的週期裁切（例：斜紋 vignette 原圖 vs 週期單元）。
+        if "FAIL" not in detail_d and "軟通過" not in detail_d:
+            return _finalize_unit(
+                unit_d,
                 f"點綴（前景 {ratio:.0%}）：{detail_d}",
             )
-        # 晶格未硬通過：用「跨縫完整性／間距」選備選，禁止只靠接縫色差
+        # 軟通過／FAIL：用「跨縫完整性／間距」選備選，禁止只靠接縫色差
         # （錯誤週期裁切常把色差修好，卻把花距拉成 2 倍，看起來很空）
         med = _interior_median_motif_area(_d_fg(arr, bg, threshold))
 
@@ -1356,18 +2010,60 @@ def make_seamless_hard_cut(
         # FAIL 結果不得靠「分數碰巧好看」壓過滿鋪／原圖
         if "FAIL" in detail_d:
             key_d = (max(key_d[0], 2) + 1, key_d[1] + 120.0)
+        elif "軟通過" in detail_d:
+            # 軟通過但色差／色帶仍差：略降級，讓硬通過級滿鋪週期有機會勝出
+            sv_d, sh_d = _tile_seam_scores(unit_d)
+            if (sv_d + sh_d) > 12.0 or max(sv_d, sh_d) > 10.0:
+                key_d = (key_d[0] + 1, key_d[1] + (sv_d + sh_d))
+        soft_or_fail_msg = (
+            f"點綴（前景 {ratio:.0%}）：{detail_d}"
+            if "軟通過" in detail_d
+            else f"點綴最佳嘗試（前景 {ratio:.0%}）：{detail_d}"
+        )
         candidates.append(
             (
                 key_d,
                 unit_d,
-                f"點綴最佳嘗試（前景 {ratio:.0%}）：{detail_d}",
+                soft_or_fail_msg,
             )
         )
+        keep_arr = arr.copy()
+        keep_msg = f"點綴保留原圖（前景 {ratio:.0%}，晶格未對齊）"
+        kv0, kh0 = _tile_seam_scores(keep_arr)
+        icon_grid = _is_icon_grid_tile(keep_arr, keep_msg, w, h)
+        if kv0 + kh0 > 26.0:
+            flat = flatten_illumination(keep_arr)
+            eq, eq_msg = maybe_equalize_seam_colors(flat)
+            if not _soft_blend_ghosts(flat, eq):
+                ev, eh = _tile_seam_scores(eq)
+                if ev + eh < kv0 + kh0 - 2.0:
+                    keep_arr = eq
+                    keep_msg = f"{keep_msg}；去光照色差"
+                    if eq_msg:
+                        keep_msg = f"{keep_msg}（{eq_msg}）"
+            # 圖示格也允許平切半幅偏移（大幅改善才採用）
+            aligned, ad = stitch_align_seamless(keep_arr)
+            kav, kah = _tile_seam_scores(aligned)
+            cur_sum = sum(_tile_seam_scores(keep_arr))
+            if icon_grid or _looks_like_icon_checkerboard(keep_arr):
+                cv2, ch2 = _edge_profile_corr(aligned)
+                if (
+                    kav + kah < cur_sum * 0.45
+                    and kav + kah <= 22.0
+                    and max(kav, kah) <= 14.0
+                    and cv2 >= 0.85
+                    and ch2 >= 0.85
+                ):
+                    keep_arr = aligned
+                    keep_msg = f"邊緣對齊 {ad}；{keep_msg}"
+            elif kav + kah < cur_sum - 2.0:
+                keep_arr = aligned
+                keep_msg = f"邊緣對齊 {ad}；{keep_msg}"
         candidates.append(
             (
-                _integrity_key(arr),
-                arr.copy(),
-                f"點綴保留原圖（前景 {ratio:.0%}，晶格未對齊）",
+                _integrity_key(keep_arr),
+                keep_arr,
+                keep_msg,
             )
         )
         unit_f, detail_f = try_make_dense_seamless(arr)
@@ -1391,7 +2087,9 @@ def make_seamless_hard_cut(
                 f"滿鋪回退（點綴未對齊，前景 {ratio:.0%}）：{detail_f}",
             )
         )
-        if margin_px > 0 and ratio < 0.45:
+        # 接縫偏高時放寬清邊門檻（恐龍／切斷圖示必須清邊）
+        clear_ratio_lim = 0.55 if (kv0 + kh0) > 30.0 else 0.45
+        if margin_px > 0 and ratio < clear_ratio_lim:
             motifs = extract_interior_motifs(arr, bg, threshold, margin_px)
             cleaned, removed = remove_edge_touching_components(
                 arr, bg, threshold, margin_px
@@ -1408,7 +2106,11 @@ def make_seamless_hard_cut(
                     filled_key = _integrity_key(filled)
                     sv0, sh0 = _tile_seam_scores(arr)
                     svf, shf = _tile_seam_scores(filled)
-                    if (svf + shf) > (sv0 + sh0) + 1.0:
+                    # 原圖跨縫切斷多 → 清邊補花應勝出
+                    cuts0 = _cross_seam_cut_count(arr, bg, threshold)
+                    if cuts0 >= 2 and (svf + shf) <= (sv0 + sh0) + 8.0:
+                        filled_key = (0, filled_key[1] * 0.5)
+                    elif (svf + shf) > (sv0 + sh0) + 1.0:
                         filled_key = (filled_key[0] + 1, filled_key[1] + 50.0)
                     candidates.append(
                         (
@@ -1419,7 +2121,7 @@ def make_seamless_hard_cut(
                     )
         candidates.sort(key=lambda t: t[0])
         _score, best_arr, best_msg = candidates[0]
-        return Image.fromarray(best_arr, mode="RGB"), best_msg
+        return _finalize_unit(best_arr, best_msg)
 
     # 稀疏不規則才清邊補花（與滿鋪週期裁切比接縫，避免清邊打壞已近無縫圖）
     use_motif = margin_px > 0 and ratio < 0.16 and not discrete
@@ -1474,15 +2176,15 @@ def make_seamless_hard_cut(
         )
         candidates.sort(key=lambda t: t[0])
         _score, best_arr, best_msg = candidates[0]
-        return Image.fromarray(best_arr, mode="RGB"), best_msg
+        return _finalize_unit(best_arr, best_msg)
 
     unit, detail = try_make_dense_seamless(arr)
     if margin_px == 0 and ratio < 0.18:
-        return (
-            Image.fromarray(unit, mode="RGB"),
+        return _finalize_unit(
+            unit,
             f"滿鋪對齊（前景 {ratio:.0%}，邊緣帶 0 未清邊）：{detail}",
         )
-    return (
-        Image.fromarray(unit, mode="RGB"),
+    return _finalize_unit(
+        unit,
         f"滿鋪模式（前景 {ratio:.0%}）：{detail}",
     )

@@ -19,6 +19,9 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
+# 擴布目標（如 100cm@300dpi）與大圖來源會超過 Pillow 預設 ~89M 像素上限。
+Image.MAX_IMAGE_PIXELS = None
+
 SUPPORTED_EXTENSIONS = {
     ".jpg",
     ".jpeg",

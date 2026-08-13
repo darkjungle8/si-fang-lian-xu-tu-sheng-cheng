@@ -16,6 +16,9 @@ from pathlib import Path
 
 from PIL import Image
 
+# 生產原圖常超過 Pillow 預設 ~89M 像素；先開圖再依 --max-side 縮放。
+Image.MAX_IMAGE_PIXELS = None
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -87,6 +90,31 @@ def _safe_stem(path: Path, input_root: Path) -> str:
     return raw[:180]
 
 
+def _cross_seam_scores(preview_arr) -> tuple[float, float]:
+    """2×2 預覽中心十字縫（單像素列／行，對應平鋪時真實接縫）。"""
+    import numpy as np
+
+    h, w = preview_arr.shape[:2]
+    mid_y, mid_x = h // 2, w // 2
+    v = float(
+        np.mean(
+            np.abs(
+                preview_arr[:, mid_x - 1].astype(np.float64)
+                - preview_arr[:, mid_x].astype(np.float64)
+            )
+        )
+    )
+    hh = float(
+        np.mean(
+            np.abs(
+                preview_arr[mid_y - 1, :].astype(np.float64)
+                - preview_arr[mid_y, :].astype(np.float64)
+            )
+        )
+    )
+    return v, hh
+
+
 def _flag_reasons(row: dict) -> list[str]:
     reasons: list[str] = []
     if row.get("error"):
@@ -102,6 +130,9 @@ def _flag_reasons(row: dict) -> list[str]:
     src_sum = float(src_v) + float(src_h)
     unit_sum = float(unit_v) + float(unit_h)
     rank = float(row.get("seam_rank") or 0.0)
+    cx, cy = row.get("cross_seam") or (0.0, 0.0)
+    cross_sum = float(cx) + float(cy)
+    cross_max = max(float(cx), float(cy))
 
     w, h = row.get("unit_size") or (0, 0)
     if min(int(w), int(h)) < 32:
@@ -111,22 +142,56 @@ def _flag_reasons(row: dict) -> list[str]:
     if min(int(sw), int(sh)) < 64:
         reasons.append(f"tiny_src:{sw}x{sh}")
 
-    keep_orig = "保留原圖" in mode
+    keep_orig = ("保留原圖" in mode) and ("邊緣對齊" not in mode) and ("去光照" not in mode)
+    icon_no_eq = "圖示格免色差" in mode
     # 保留原圖：演算法已選最佳（原圖），不當「未改善」假陽性
-    # 僅在接縫極高時標記，供人工決定是否排除源圖
+    # 接縫仍明顯時標記，供隔離不合格源圖（對齊可視色差/十字縫）
     if keep_orig:
-        if unit_sum > 50 or max(float(unit_v), float(unit_h)) > 40:
+        if unit_sum > 40 or max(float(unit_v), float(unit_h)) > 30:
             reasons.append(f"source_seam_high:{unit_sum:.1f}")
+    elif icon_no_eq or "結構安全對齊" in mode or "去光照均值" in mode:
+        # 圖示格／結構安全路徑：色差指標可偏高，以無重影為準
+        if unit_sum > 55 or max(float(unit_v), float(unit_h)) > 40:
+            reasons.append(f"still_high:{unit_v}+{unit_h}")
+        elif unit_sum >= src_sum * 0.98 and unit_sum > 50:
+            reasons.append(f"not_improved:{src_sum:.1f}->{unit_sum:.1f}")
     else:
         # 僅在接縫未實質下降時標記（已改善的不算）
         if unit_sum > 12.0 and unit_sum >= src_sum * 0.95:
             # 忽略 <2 的微小波動
             if unit_sum >= src_sum + 2.0 or unit_sum >= src_sum * 1.02:
                 reasons.append(f"not_improved:{src_sum:.1f}->{unit_sum:.1f}")
-    if unit_sum > 90 or max(float(unit_v), float(unit_h)) > 60:
-        reasons.append(f"still_high:{unit_v}+{unit_h}")
+        # 週期裁切等「有處理」但仍殘留明顯色差十字縫
+        # 邊緣對齊已大幅改善者放寬（半幅偏移後高頻紋理 RGB 殘差常在 25–65）
+        if "邊緣對齊" in mode:
+            if unit_sum > 75 or max(float(unit_v), float(unit_h)) > 42:
+                reasons.append(f"still_high:{unit_v}+{unit_h}")
+        elif unit_sum > 38 or max(float(unit_v), float(unit_h)) > 30:
+            reasons.append(f"still_high:{unit_v}+{unit_h}")
+    if not icon_no_eq and "邊緣對齊" not in mode and (
+        unit_sum > 70 or max(float(unit_v), float(unit_h)) > 45
+    ):
+        if f"still_high:{unit_v}+{unit_h}" not in reasons:
+            reasons.append(f"still_high:{unit_v}+{unit_h}")
     if rank > 120:
         reasons.append(f"rank_high:{rank:.1f}")
+
+    # 2×2 十字縫：平鋪預覽用直接拼接時才以 cross 為準；錯位預覽看中縫不代表平鋪品質
+    preview_detail = row.get("preview_detail") or ""
+    use_cross = "直接拼接" in preview_detail
+    if use_cross:
+        # 半幅偏移：外緣數學連續，高頻紋理會讓 RGB 色差偏高但不代表可視切斷
+        if "邊緣對齊" in mode or "半幅偏移" in mode:
+            cross_limit_sum = 70.0
+            cross_limit_max = 45.0
+        elif icon_no_eq or "結構安全對齊" in mode:
+            cross_limit_sum = 55.0
+            cross_limit_max = 40.0
+        else:
+            cross_limit_sum = 28.0
+            cross_limit_max = 18.0
+        if cross_sum > cross_limit_sum or cross_max > cross_limit_max:
+            reasons.append(f"cross_seam_high:{cx}+{cy}")
 
     m = re.search(r"晶格週期\s*(\d+)\s*[×x]\s*(\d+)", mode)
     if m:
@@ -162,6 +227,7 @@ def run_one_job(job: dict) -> dict:
         make_seamless_hard_cut,
         tile_2x2_multi,
     )
+    import numpy as np
 
     path = Path(job["path"])
     out_dir = Path(job["out_dir"])
@@ -207,9 +273,12 @@ def run_one_job(job: dict) -> dict:
         v, h = _tile_seam_scores(uarr)
         rank = _seam_rank(uarr)
         preview, detail, _ = tile_2x2_multi(unit)
+        parr = np.asarray(preview.convert("RGB"))
+        cv, ch = _cross_seam_scores(parr)
 
         row["mode"] = mode
         row["unit_seam"] = [round(v, 2), round(h, 2)]
+        row["cross_seam"] = [round(cv, 2), round(ch, 2)]
         row["seam_rank"] = round(rank, 2)
         row["unit_size"] = list(unit.size)
         row["preview_detail"] = detail
@@ -248,6 +317,7 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
         "mode",
         "src_seam",
         "unit_seam",
+        "cross_seam",
         "seam_rank",
         "src_size",
         "proc_size",
@@ -263,7 +333,7 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
         w.writeheader()
         for r in rows:
             flat = dict(r)
-            for k in ("src_seam", "unit_seam", "src_size", "proc_size", "unit_size"):
+            for k in ("src_seam", "unit_seam", "cross_seam", "src_size", "proc_size", "unit_size"):
                 flat[k] = json.dumps(r.get(k), ensure_ascii=False)
             flat["reasons"] = "|".join(r.get("reasons") or [])
             w.writerow(flat)

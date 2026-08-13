@@ -11,6 +11,8 @@ from pathlib import Path
 
 from PIL import Image
 
+Image.MAX_IMAGE_PIXELS = None
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -72,6 +74,9 @@ def test_96885088533() -> list[dict]:
     """稀疏花枝／花環：禁止半週期晶格；單元接縫須優於原圖或足夠低。"""
     folder = FIXTURES / "96885088533"
     rows: list[dict] = []
+    if not folder.is_dir():
+        print("[SKIP] no 96885088533 fixtures")
+        return rows
     for path in sorted(folder.glob("*.png")):
         row = _run_one(path)
         errors: list[str] = []
@@ -121,6 +126,9 @@ def test_temu_visual() -> list[dict]:
     """昨日目視偏高接縫樣本：至少要比原圖改善，且不得 mode FAIL。"""
     folder = FIXTURES / "temu_visual"
     rows: list[dict] = []
+    if not folder.is_dir():
+        print("[SKIP] no temu_visual fixtures")
+        return rows
     for path in sorted(folder.glob("*.png")):
         row = _run_one(path)
         errors: list[str] = []
@@ -128,13 +136,18 @@ def test_temu_visual() -> list[dict]:
         sv, sh = row["src_seam"]
         if "FAIL" in row["mode"]:
             errors.append("mode_FAIL")
-        # 滿鋪應明顯改善；殘差允許中等（部分 Codex 原圖本身接縫極差）
-        if (v + h) > (sv + sh) * 0.75:
-            errors.append(f"not_improved:{sv}+{sh}->{v}+{h}")
-        if (v + h) > 90 or max(v, h) > 60:
-            errors.append(f"still_high:{v}+{h}")
-        if row["seam_rank"] > 120:
-            errors.append(f"rank_high:{row['seam_rank']}")
+        keep = "保留原圖" in row["mode"]
+        # 源圖本身接縫極差且無合格週期裁切：允許保留原圖（生產審計會隔離）
+        # 不得再放行「結構改善但色差十字縫仍明顯」的中等壞裁切
+        if keep and (sv + sh) > 150:
+            pass
+        else:
+            if (v + h) > (sv + sh) * 0.75:
+                errors.append(f"not_improved:{sv}+{sh}->{v}+{h}")
+            if (v + h) > 90 or max(v, h) > 60:
+                errors.append(f"still_high:{v}+{h}")
+            if row["seam_rank"] > 120:
+                errors.append(f"rank_high:{row['seam_rank']}")
         row["errors"] = errors
         row["ok"] = len(errors) == 0
         rows.append(row)
@@ -174,6 +187,43 @@ def test_prod_8_7() -> list[dict]:
     return rows
 
 
+def test_prod_8_9() -> list[dict]:
+    """8.9 推單：咖啡圖示格免色差；斜紋週期裁切須明顯改善。"""
+    folder = FIXTURES / "prod_8_9"
+    rows: list[dict] = []
+    if not folder.is_dir():
+        print("[SKIP] no prod_8_9 fixtures")
+        return rows
+    for path in sorted(folder.glob("*.png")):
+        row = _run_one(path)
+        errors: list[str] = []
+        v, h = row["unit_seam"]
+        sv, sh = row["src_seam"]
+        if "FAIL" in row["mode"]:
+            errors.append("mode_FAIL")
+        if path.name.startswith("coffee_"):
+            # 咖啡圖示格：禁止強 soft；允許純滾半幅偏移／清邊／結構安全
+            if "FAIL" in row["mode"]:
+                errors.append("coffee_mode_FAIL")
+            if "色差強化對齊" in row["mode"] or "色差均衡" in row["mode"]:
+                errors.append("coffee_strong_soft_eq")
+            if (v + h) > (sv + sh) * 1.05:
+                errors.append(f"coffee_worsened:{sv}+{sh}->{v}+{h}")
+            if (v + h) > 28.0:
+                errors.append(f"coffee_seam_high:{v}+{h}")
+        if path.name.startswith("stripe_"):
+            if (v + h) > (sv + sh) * 0.75 and (v + h) > 18.0:
+                errors.append(f"stripe_not_improved:{sv}+{sh}->{v}+{h}")
+        row["errors"] = errors
+        row["ok"] = len(errors) == 0
+        rows.append(row)
+        status = "OK" if row["ok"] else "FAIL"
+        print(f"[{status}] {path.name} {sv}+{sh}->{v}+{h} | {row['mode'][:70]}")
+        if errors:
+            print(f"         errors={errors}")
+    return rows
+
+
 def test_half_pitch_helper() -> None:
     """單元測試：最近鄰約 2× 軸向 pitch 時應加倍。"""
     # 磚縫格：軸向投影半週期 70，真實 NN≈140
@@ -197,7 +247,9 @@ def main() -> int:
     rows_b = test_temu_visual()
     print("=== prod_8_7 ===")
     rows_c = test_prod_8_7()
-    all_rows = rows_a + rows_b + rows_c
+    print("=== prod_8_9 ===")
+    rows_d = test_prod_8_9()
+    all_rows = rows_a + rows_b + rows_c + rows_d
     summary = {
         "total": len(all_rows),
         "ok": sum(1 for r in all_rows if r["ok"]),
