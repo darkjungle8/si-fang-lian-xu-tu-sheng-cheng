@@ -247,9 +247,19 @@ def _area_cluster_medians(areas: list[int]) -> list[float]:
         return [float(np.median(arr))]
     gaps = arr[1:] / np.maximum(arr[:-1], 1.0)
     i = int(np.argmax(gaps))
-    if gaps[i] >= 1.8 and 2 <= i <= len(arr) - 3:
+    # 1.65：水彩暈開／半隻動物常把 1.8 缺口填到 1.79，仍應切開大圖章
+    if gaps[i] >= 1.65 and 2 <= i <= len(arr) - 3:
         return [float(np.median(arr[: i + 1])), float(np.median(arr[i + 1 :]))]
-    return [float(np.median(arr))]
+    mx = float(arr[-1])
+    med = float(np.median(arr))
+    # 動物＋骨頭／色塊：中間可能有過渡面積，改用「接近最大塊」當大圖章
+    if mx >= max(med * 6.0, 5000.0) and len(arr) >= 8:
+        thr = mx * 0.55
+        large = arr[arr >= thr]
+        small = arr[arr < thr]
+        if len(large) >= 4 and len(small) >= 4:
+            return [float(np.median(small)), float(np.median(large))]
+    return [med]
 
 
 def _tile_seam_scores(arr: np.ndarray) -> tuple[float, float]:
@@ -389,11 +399,11 @@ def _correct_half_pitch(
         for _ in range(3):
             if cur < 8:
                 break
-            if 1.45 * cur <= nn <= 2.7 * cur:
+            if 1.70 * cur <= nn <= 2.45 * cur:
                 cur *= 2.0
                 continue
-            # NN 遠大於 pitch（>2.7×）也視為低估，最多拉到 ≥0.55×NN
-            if nn > 2.7 * cur and cur * 2.0 <= nn * 1.15:
+            # NN 遠大於 pitch（>2.45×）也視為低估，最多拉到 ≥0.55×NN
+            if nn > 2.45 * cur and cur * 2.0 <= nn * 1.15:
                 cur *= 2.0
                 continue
             break
@@ -731,6 +741,33 @@ def _wrap_gap_ratios(
     )
 
 
+def _large_motif_median(
+    arr: np.ndarray,
+    bg: Sequence[int],
+    threshold: float,
+    med: float,
+) -> float:
+    """雙尺度時切開檢查改用大圖章中位面積，否則半隻狗仍大於骨頭／色點。"""
+    if med < 40:
+        return med
+    fg = _fg_mask(arr, bg, threshold)
+    cents = _fg_centroids(
+        fg, min_area=max(40, int(med * 0.08)), skip_edge=True
+    )
+    if len(cents) < 6:
+        return med
+    meds = _area_cluster_medians([a for *_, a in cents])
+    if len(meds) < 2 or meds[1] < meds[0] * 4.0:
+        return med
+    split = float(np.sqrt(meds[0] * meds[1]))
+    if meds[1] >= meds[0] * 6.0:
+        split = max(split, float(meds[1]) * 0.55)
+    large_areas = [a for *_, a in cents if a >= split]
+    if len(large_areas) < 4:
+        return med
+    return max(med, float(np.median(large_areas)))
+
+
 def _cross_seam_cut_count(
     arr: np.ndarray,
     bg: Sequence[int],
@@ -745,6 +782,7 @@ def _cross_seam_cut_count(
     fg = _fg_mask(arr, bg, threshold)
     if med is None:
         med = _interior_median_motif_area(fg)
+    med = _large_motif_median(arr, bg, threshold, med)
     if med < 40:
         return 0
     body = _erode_bool(fg, 2)
@@ -793,6 +831,9 @@ def _dual_scale_groups(
     if len(meds) < 2:
         return None
     split = float(np.sqrt(meds[0] * meds[1]))
+    # 動物 vs 小填充面積差極大時，幾何平均會把中等色塊算進大圖章
+    if meds[1] >= meds[0] * 6.0:
+        split = max(split, float(meds[1]) * 0.55)
     large = [(cy, cx) for cy, cx, a in cents if a >= split]
     small = [(cy, cx) for cy, cx, a in cents if a < split]
     if len(large) < 6 or len(small) < 4:
@@ -1176,23 +1217,43 @@ def try_discrete_lattice_crop(
     pitch_pts = [(cy, cx) for cy, cx, _ in cents_pitch]
     pitch_x, pitch_y = _correct_half_pitch(pitch_x, pitch_y, pitch_pts)
     nn_pitch = _nn_median_spacing(pitch_pts)
+    # 軸向週期仍遠小於最近鄰：改用 NN（骨頭／色點會把軸投影拉成 20～40px）
+    if nn_pitch >= 64.0:
+        if pitch_x > 0 and pitch_x < nn_pitch * 0.72:
+            pitch_x = nn_pitch
+        if pitch_y > 0 and pitch_y < nn_pitch * 0.72:
+            pitch_y = nn_pitch
     # 絕對／相對下限：過短週期幾乎一定是碎花亞晶格，硬通過會切花
     min_pitch = max(64.0, float(np.sqrt(max(med_pitch, 1.0))) * 1.5)
     if nn_pitch >= 40:
         min_pitch = max(min_pitch, nn_pitch * 0.6)
     if pitch_x > 0 and pitch_x < min_pitch:
-        # 優先整數倍拉到下限附近
-        mul = max(2, int(np.ceil(min_pitch / max(pitch_x, 1e-6))))
-        pitch_x *= float(mul)
+        # 拉到接近 NN，避免 ceil(min/p)*p 過頭（例 170→340 但 NN=267）
+        target = nn_pitch if nn_pitch >= min_pitch else min_pitch
+        mul = max(1, int(round(target / max(pitch_x, 1e-6))))
+        cand = pitch_x * float(mul)
+        if cand < min_pitch * 0.85:
+            mul = max(2, int(np.ceil(min_pitch / max(pitch_x, 1e-6))))
+            cand = pitch_x * float(mul)
+        pitch_x = cand
     if pitch_y > 0 and pitch_y < min_pitch:
-        mul = max(2, int(np.ceil(min_pitch / max(pitch_y, 1e-6))))
-        pitch_y *= float(mul)
+        target = nn_pitch if nn_pitch >= min_pitch else min_pitch
+        mul = max(1, int(round(target / max(pitch_y, 1e-6))))
+        cand = pitch_y * float(mul)
+        if cand < min_pitch * 0.85:
+            mul = max(2, int(np.ceil(min_pitch / max(pitch_y, 1e-6))))
+            cand = pitch_y * float(mul)
+        pitch_y = cand
     stagger = _detect_stagger(cents_pitch, med_pitch)
     c2x, c2y = _detect_color_period_2x(arr, cents_all, bg, threshold)
+    # 週期已接近半幅時禁止再 2×（不規則散點／已是完整色週期）
     if c2x or c2y:
-        c2x, c2y = True, True
-        pitch_x = pitch_x * 2.0
-        pitch_y = pitch_y * 2.0
+        if pitch_x * 2.0 <= w * 0.48 and pitch_y * 2.0 <= h * 0.48:
+            c2x, c2y = True, True
+            pitch_x = pitch_x * 2.0
+            pitch_y = pitch_y * 2.0
+        else:
+            c2x, c2y = False, False
 
     sizes_x = _float_period_sizes(w, pitch_x)
     sizes_y = _float_period_sizes(h, pitch_y)
@@ -1472,6 +1533,19 @@ def try_make_discrete_seamless(
         # 過短週期不得硬通過
         if px_r and py_r and (px_r < 64 or py_r < 64):
             key = (max(key[0], 1) + 1, key[1] + 80.0)
+        # 相對大圖章最近鄰過短 → 半週期切動物
+        if px_r and py_r:
+            fg_n = _fg_mask_merged(arr, bg, threshold)
+            cents_n = _fg_centroids(
+                fg_n, min_area=max(40, int(med * 0.08) if med else 40), skip_edge=True
+            )
+            groups_n = _dual_scale_groups(cents_n)
+            pts_n = groups_n[0] if groups_n is not None else [
+                (cy, cx) for cy, cx, _ in cents_n
+            ]
+            nn_n = _nn_median_spacing(pts_n)
+            if nn_n >= 80 and (px_r < nn_n * 0.55 or py_r < nn_n * 0.55):
+                key = (max(key[0], 1) + 1, key[1] + 90.0)
         candidates.append((key, cropped, f"點綴晶格({detail})"))
         if key[0] == 0:
             # 接縫明顯差於原圖時不提早返回（避免「切花但色差碰巧過門」）
@@ -1480,10 +1554,16 @@ def try_make_discrete_seamless(
             if (cv + ch) <= (ov + oh) * 1.02 + 1.0:
                 return cropped, f"點綴晶格({detail})"
 
-    # 僅質心滾動備選（完整性排名，不用邊緣相關）
-    if med >= 40:
-        fg = _fg_mask(arr, bg, threshold)
+    # 僅質心滾動備選。原圖已有碰邊殘片時禁止：滾動只會把半隻動物捲到畫面中央。
+    orig_cuts = _cross_seam_cut_count(arr, bg, threshold, med=med)
+    if med >= 40 and orig_cuts == 0:
+        fg = _fg_mask_merged(arr, bg, threshold)
         cents = _fg_centroids(fg, min_area=max(40, int(med * 0.08)), skip_edge=True)
+        if len(cents) < 4:
+            cents = _fg_centroids(fg, min_area=max(40, int(med * 0.08)))
+        groups_ph = _dual_scale_groups(cents)
+        if groups_ph is not None:
+            cents = [(cy, cx, 1000) for cy, cx in groups_ph[0]]
         if len(cents) >= 4:
             ox, oy, px, py = _centroid_seam_offsets(
                 cents, arr.shape[0], arr.shape[1], med
@@ -1530,6 +1610,25 @@ def try_make_discrete_seamless(
     if best_key[0] == 1:
         return best_tile, f"{best_msg}（軟通過 cuts=0）"
     return best_tile, f"FAIL 點綴未對齊（{best_msg}）"
+
+
+def large_stamp_like(
+    arr: np.ndarray,
+    bg: Sequence[int],
+    threshold: float = 40.0,
+) -> bool:
+    """獨立大圖章（動物／貼紙），相對滿鋪紋理。"""
+    fg = _fg_mask_merged(arr, bg, threshold)
+    med = _interior_median_motif_area(fg)
+    cents = _fg_centroids(
+        fg, min_area=max(40, int(med * 0.08) if med else 40), skip_edge=True
+    )
+    if len(cents) < 4:
+        return False
+    areas = [a for *_, a in cents]
+    mx = max(areas)
+    med_a = float(np.median(areas))
+    return mx >= 8000 and mx >= med_a * 5.0
 
 
 cross_seam_cut_count = _cross_seam_cut_count

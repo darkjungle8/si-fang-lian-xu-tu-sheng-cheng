@@ -1,5 +1,7 @@
 # 四方連續圖生成
 
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+
 將平面圖處理成可四方連續拼接的單元圖，並以 2×2 預覽驗證接縫。接縫處不做模糊，多餘前景以硬切改為背景色。
 
 可選串接內建 `kuotu` 做平鋪擴展、裁切、白邊／黑邊，並輸出 TIFF／PNG／JPEG。
@@ -85,3 +87,11 @@ si-fang-lian-xu-tu-sheng-cheng/
     pipeline.py         # 串接 kuotu 擴圖
     paths.py
 ```
+
+## 授權
+
+本專案以 [GNU Affero General Public License v3.0](LICENSE)（AGPL-3.0）釋出。
+
+- 可自由使用、修改與散布
+- 修改後的程式，以及以網路服務形式提供時，須以相同授權公開完整原始碼
+- 詳見根目錄 `LICENSE` 檔

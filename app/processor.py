@@ -9,12 +9,14 @@ from typing import Sequence
 
 import numpy as np
 from PIL import Image, ImageFilter
+import cv2
 
 from app.color_utils import color_distance, detect_background
 from app.discrete_lattice import (
     _cross_seam_cut_count,
     _discrete_integrity_ok,
     _wrap_gap_ratios,
+    large_stamp_like,
     looks_like_regular_lattice,
 )
 
@@ -93,20 +95,28 @@ def _iter_components(
 def _component_to_stamp(
     arr: np.ndarray,
     coords: list[tuple[int, int]],
+    *,
+    dilate_px: int = 4,
 ) -> MotifStamp:
-    ys = [c[0] for c in coords]
-    xs = [c[1] for c in coords]
-    y0, y1 = min(ys), max(ys)
-    x0, x1 = min(xs), max(xs)
+    h, w = arr.shape[:2]
+    ys_o = np.array([c[0] for c in coords], dtype=np.int32)
+    xs_o = np.array([c[1] for c in coords], dtype=np.int32)
+    mask_full = np.zeros((h, w), dtype=np.uint8)
+    mask_full[ys_o, xs_o] = 1
+    if dilate_px > 0:
+        k = 2 * int(dilate_px) + 1
+        ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+        mask_full = cv2.dilate(mask_full, ker)
+    ys, xs = np.where(mask_full)
+    y0, y1 = int(ys.min()), int(ys.max())
+    x0, x1 = int(xs.min()), int(xs.max())
     hm, wm = y1 - y0 + 1, x1 - x0 + 1
     patch = np.zeros((hm, wm, 3), dtype=np.uint8)
-    mask = np.zeros((hm, wm), dtype=bool)
-    for y, x in coords:
-        mask[y - y0, x - x0] = True
-        patch[y - y0, x - x0] = arr[y, x]
-    area = len(coords)
-    cy = float(np.mean(ys) - y0)
-    cx = float(np.mean(xs) - x0)
+    mask = mask_full[y0 : y1 + 1, x0 : x1 + 1].astype(bool)
+    patch[mask] = arr[y0 : y1 + 1, x0 : x1 + 1][mask]
+    area = int(ys_o.size)
+    cy = float(np.mean(ys_o) - y0)
+    cx = float(np.mean(xs_o) - x0)
     return MotifStamp(patch=patch, mask=mask, area=area, cy=cy, cx=cx)
 
 
@@ -158,8 +168,11 @@ def remove_edge_touching_components(
         ys = [c[0] for c in coords]
         xs = [c[1] for c in coords]
         removed.append((float(np.mean(ys)), float(np.mean(xs)), len(coords)))
-        for y, x in coords:
-            out[y, x] = bg_rgb
+        mask_c = np.zeros((h, w), dtype=np.uint8)
+        mask_c[np.array(ys, dtype=np.int32), np.array(xs, dtype=np.int32)] = 1
+        ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        mask_c = cv2.dilate(mask_c, ker)
+        out[mask_c.astype(bool)] = bg_rgb
     return out, removed
 
 
@@ -267,10 +280,21 @@ def refill_with_wrapped_motifs(
     placements: list[tuple[float, float, int]] = []
     # 大面積先補，較能代表原密度
     ordered = sorted(removed, key=lambda t: t[2], reverse=True)
-    # 最多補 removed 的 70%，且不超過素材數*2
-    budget = min(len(ordered), max(1, int(round(len(ordered) * 0.7))), max(2, len(motifs) * 2))
+    large_cut = sum(1 for t in ordered if t[2] >= 4000)
+    if large_cut > 0:
+        # 動物等大圖章：被切掉的都補回（環繞貼），否則邊緣空洞
+        budget = len(ordered)
+    else:
+        # 最多補 removed 的 70%，且不超過素材數*2
+        budget = min(
+            len(ordered),
+            max(1, int(round(len(ordered) * 0.7))),
+            max(2, len(motifs) * 2),
+        )
     for cy, cx, area in ordered[:budget]:
-        cy, cx = _nudge_off_corners(cy, cx, h, w)
+        # 大圖章要留在邊緣才能環繞接上；小碎花仍避開四角擠堆
+        if area < 4000:
+            cy, cx = _nudge_off_corners(cy, cx, h, w)
         placements.append((cy, cx, area))
 
     # 邊緣若仍明顯偏空，少量補點（嚴格上限）
@@ -299,6 +323,7 @@ def refill_with_wrapped_motifs(
     for cy, cx, area in placements:
         motif = _pick_motif(motifs, area, rng)
         radius = max(12.0, 0.9 * float(np.sqrt(motif.area / np.pi)) * 2.2)
+        overlap_lim = 0.14 if motif.area >= 4000 else max_overlap
 
         # 與已放置朵保持環面距離
         too_close = any(
@@ -311,13 +336,14 @@ def refill_with_wrapped_motifs(
             for _ in range(20):
                 ny = float((cy + rng.normal(0, radius * 0.6)) % h)
                 nx = float((cx + rng.normal(0, radius * 0.6)) % w)
-                ny, nx = _nudge_off_corners(ny, nx, h, w)
+                if motif.area < 4000:
+                    ny, nx = _nudge_off_corners(ny, nx, h, w)
                 if any(
                     _torus_distance(ny, nx, py, px, h, w) < max(radius, pr) * 0.85
                     for py, px, pr in placed_centers
                 ):
                     continue
-                if _overlap_ratio(out, motif, ny, nx, occupied) <= max_overlap:
+                if _overlap_ratio(out, motif, ny, nx, occupied) <= overlap_lim:
                     cy, cx = ny, nx
                     found = True
                     break
@@ -325,19 +351,20 @@ def refill_with_wrapped_motifs(
                 continue  # 放棄，不硬塞
         else:
             # 檢查重疊；不行就抖動，再不放
-            ok = _overlap_ratio(out, motif, cy, cx, occupied) <= max_overlap
+            ok = _overlap_ratio(out, motif, cy, cx, occupied) <= overlap_lim
             if not ok:
                 found = False
                 for _ in range(16):
                     ny = float((cy + rng.normal(0, radius * 0.5)) % h)
                     nx = float((cx + rng.normal(0, radius * 0.5)) % w)
-                    ny, nx = _nudge_off_corners(ny, nx, h, w)
+                    if motif.area < 4000:
+                        ny, nx = _nudge_off_corners(ny, nx, h, w)
                     if any(
                         _torus_distance(ny, nx, py, px, h, w) < max(radius, pr) * 0.85
                         for py, px, pr in placed_centers
                     ):
                         continue
-                    if _overlap_ratio(out, motif, ny, nx, occupied) <= max_overlap:
+                    if _overlap_ratio(out, motif, ny, nx, occupied) <= overlap_lim:
                         cy, cx = ny, nx
                         found = True
                         break
@@ -1589,42 +1616,49 @@ def try_make_dense_seamless(arr: np.ndarray) -> tuple[np.ndarray, str]:
                     f"{('；' + eq_msg) if eq_msg else ''}"
                 )
         # 圖示格與一般滿鋪都可試半幅偏移；圖示格走 prefer_flat 平切
-        aligned, ad = stitch_align_seamless(best)
-        av, ah = _tile_seam_scores(aligned)
-        # 圖示格：必須大幅改善，且邊緣相關要夠高（否則寧可不撕）
-        if icon_grid:
-            cv2, ch2 = _edge_profile_corr(aligned)
-            ok_icon = (
-                av + ah < best_seam * 0.45
-                and av + ah <= 22.0
-                and max(av, ah) <= 14.0
-                and cv2 >= 0.85
-                and ch2 >= 0.85
-            )
-            if ok_icon:
+        # 動物／貼紙大圖章禁止半幅偏移（會從中央切斷）
+        bg_est = tuple(int(x) for x in np.median(best.reshape(-1, 3), axis=0))
+        stampish = large_stamp_like(best, bg_est, 40.0)
+        if not stampish:
+            aligned, ad = stitch_align_seamless(best)
+            av, ah = _tile_seam_scores(aligned)
+            # 圖示格：必須大幅改善，且邊緣相關要夠高（否則寧可不撕）
+            if icon_grid:
+                cv2, ch2 = _edge_profile_corr(aligned)
+                ok_icon = (
+                    av + ah < best_seam * 0.45
+                    and av + ah <= 22.0
+                    and max(av, ah) <= 14.0
+                    and cv2 >= 0.85
+                    and ch2 >= 0.85
+                )
+                if ok_icon:
+                    best = aligned
+                    best_seam = av + ah
+                    best_detail = f"邊緣對齊 {ad}；{best_detail}"
+            elif av + ah < best_seam - 2.0:
                 best = aligned
                 best_seam = av + ah
                 best_detail = f"邊緣對齊 {ad}；{best_detail}"
-        elif av + ah < best_seam - 2.0:
-            best = aligned
-            best_seam = av + ah
-            best_detail = f"邊緣對齊 {ad}；{best_detail}"
-            # 半幅偏移後禁止 soft 混合，只做均值對齊
-            mean2 = equalize_edge_means(best, band_frac=0.05)
-            ev2, eh2 = _tile_seam_scores(mean2)
-            if ev2 + eh2 < best_seam - 1.0 and not _soft_blend_ghosts(best, mean2):
-                best = mean2
-                best_seam = ev2 + eh2
-                best_detail = (
-                    f"{best_detail}；邊緣均值對齊 "
-                    f"{av:.0f}+{ah:.0f}→{ev2:.0f}+{eh2:.0f}"
-                )
+                # 半幅偏移後禁止 soft 混合，只做均值對齊
+                mean2 = equalize_edge_means(best, band_frac=0.05)
+                ev2, eh2 = _tile_seam_scores(mean2)
+                if ev2 + eh2 < best_seam - 1.0 and not _soft_blend_ghosts(best, mean2):
+                    best = mean2
+                    best_seam = ev2 + eh2
+                    best_detail = (
+                        f"{best_detail}；邊緣均值對齊 "
+                        f"{av:.0f}+{ah:.0f}→{ev2:.0f}+{eh2:.0f}"
+                    )
 
     return best, best_detail
 
 
 def _finalize_unit(arr: np.ndarray, detail: str) -> tuple[Image.Image, str]:
     """最終色差拋光（滿鋪／點綴共用出口）。"""
+    # 清邊補花／卡通圖章：禁止 soft 對邊混合（會把對側動物印成殘影）
+    if "清邊" in detail or "補花" in detail:
+        return Image.fromarray(arr, mode="RGB"), detail
     iconish = ("圖示格免色差" in detail) or _looks_like_icon_checkerboard(arr)
     # 半幅偏移後外緣已連續：禁止 soft 混合（會把不相鄰內容印壞，造成「切斷」假象）
     # 僅允許均值／方差對齊壓殘餘色帶
@@ -1719,6 +1753,9 @@ def tile_2x2_multi(
     cv, ch = _edge_profile_corr(arr)
     plain_sum = plain_v + plain_h
     if prefer_plain or (cv >= 0.85 and ch >= 0.85 and plain_sum <= 18.0):
+        return _plain()
+    # 環繞圖章：對邊是同一隻動物的左右半，剖面相關低但像素差小
+    if plain_sum <= 16.0 and max(plain_v, plain_h) <= 12.0:
         return _plain()
     # 半幅偏移單元：外緣來自原圖中心相鄰列，高頻紋理會讓 plain_sum 偏高，
     # 但可視上連續；相關尚可時優先直接拼接，避免錯位補白造假縫
@@ -2030,35 +2067,37 @@ def make_seamless_hard_cut(
         keep_arr = arr.copy()
         keep_msg = f"點綴保留原圖（前景 {ratio:.0%}，晶格未對齊）"
         kv0, kh0 = _tile_seam_scores(keep_arr)
-        icon_grid = _is_icon_grid_tile(keep_arr, keep_msg, w, h)
+        stampish = large_stamp_like(keep_arr, bg, threshold)
         if kv0 + kh0 > 26.0:
             flat = flatten_illumination(keep_arr)
             eq, eq_msg = maybe_equalize_seam_colors(flat)
-            if not _soft_blend_ghosts(flat, eq):
+            if (not stampish) and (not _soft_blend_ghosts(flat, eq)):
                 ev, eh = _tile_seam_scores(eq)
                 if ev + eh < kv0 + kh0 - 2.0:
                     keep_arr = eq
                     keep_msg = f"{keep_msg}；去光照色差"
                     if eq_msg:
                         keep_msg = f"{keep_msg}（{eq_msg}）"
-            # 圖示格也允許平切半幅偏移（大幅改善才採用）
-            aligned, ad = stitch_align_seamless(keep_arr)
-            kav, kah = _tile_seam_scores(aligned)
-            cur_sum = sum(_tile_seam_scores(keep_arr))
-            if icon_grid or _looks_like_icon_checkerboard(keep_arr):
-                cv2, ch2 = _edge_profile_corr(aligned)
-                if (
-                    kav + kah < cur_sum * 0.45
-                    and kav + kah <= 22.0
-                    and max(kav, kah) <= 14.0
-                    and cv2 >= 0.85
-                    and ch2 >= 0.85
-                ):
+            # 大圖章禁止半幅偏移（會從畫面中央切斷動物）
+            if not stampish:
+                icon_grid = _is_icon_grid_tile(keep_arr, keep_msg, w, h)
+                aligned, ad = stitch_align_seamless(keep_arr)
+                kav, kah = _tile_seam_scores(aligned)
+                cur_sum = sum(_tile_seam_scores(keep_arr))
+                if icon_grid or _looks_like_icon_checkerboard(keep_arr):
+                    cv2, ch2 = _edge_profile_corr(aligned)
+                    if (
+                        kav + kah < cur_sum * 0.45
+                        and kav + kah <= 22.0
+                        and max(kav, kah) <= 14.0
+                        and cv2 >= 0.85
+                        and ch2 >= 0.85
+                    ):
+                        keep_arr = aligned
+                        keep_msg = f"邊緣對齊 {ad}；{keep_msg}"
+                elif kav + kah < cur_sum - 2.0:
                     keep_arr = aligned
                     keep_msg = f"邊緣對齊 {ad}；{keep_msg}"
-            elif kav + kah < cur_sum - 2.0:
-                keep_arr = aligned
-                keep_msg = f"邊緣對齊 {ad}；{keep_msg}"
         candidates.append(
             (
                 _integrity_key(keep_arr),
@@ -2080,6 +2119,8 @@ def make_seamless_hard_cut(
                 dense_key = (dense_key[0], dense_key[1] + 40.0)
             else:
                 dense_key = (dense_key[0] + 1, dense_key[1] + 200.0)
+        if stampish and "半幅偏移" in detail_f:
+            dense_key = (dense_key[0] + 1, dense_key[1] + 250.0)
         candidates.append(
             (
                 dense_key,
@@ -2089,10 +2130,17 @@ def make_seamless_hard_cut(
         )
         # 接縫偏高時放寬清邊門檻（恐龍／切斷圖示必須清邊）
         clear_ratio_lim = 0.55 if (kv0 + kh0) > 30.0 else 0.45
-        if margin_px > 0 and ratio < clear_ratio_lim:
-            motifs = extract_interior_motifs(arr, bg, threshold, margin_px)
+        cuts0 = _cross_seam_cut_count(arr, bg, threshold)
+        # GUI 邊緣帶=0 時，碰邊殘花仍自動清（大圖章被切斷必須補）
+        clear_px = margin_px
+        if clear_px <= 0 and (
+            "FAIL" in detail_d or cuts0 >= 1 or stampish
+        ):
+            clear_px = 3
+        if clear_px > 0 and ratio < clear_ratio_lim:
+            motifs = extract_interior_motifs(arr, bg, threshold, clear_px)
             cleaned, removed = remove_edge_touching_components(
-                arr, bg, threshold, margin_px
+                arr, bg, threshold, clear_px
             )
             if len(motifs) >= 2 and len(removed) > 0:
                 filled = refill_with_wrapped_motifs(
@@ -2106,9 +2154,8 @@ def make_seamless_hard_cut(
                     filled_key = _integrity_key(filled)
                     sv0, sh0 = _tile_seam_scores(arr)
                     svf, shf = _tile_seam_scores(filled)
-                    # 原圖跨縫切斷多 → 清邊補花應勝出
-                    cuts0 = _cross_seam_cut_count(arr, bg, threshold)
-                    if cuts0 >= 2 and (svf + shf) <= (sv0 + sh0) + 8.0:
+                    # 原圖跨縫切斷／大圖章碰邊 → 清邊補花應勝出
+                    if (cuts0 >= 1 or stampish) and (svf + shf) <= (sv0 + sh0) + 8.0:
                         filled_key = (0, filled_key[1] * 0.5)
                     elif (svf + shf) > (sv0 + sh0) + 1.0:
                         filled_key = (filled_key[0] + 1, filled_key[1] + 50.0)
