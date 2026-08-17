@@ -537,7 +537,12 @@ def looks_like_regular_lattice(
         # 交錯格軸向 CV 常 >0.55，但 NN CV 仍低
         if nn_cv <= max_cv and len(points) >= 8:
             return True
-        return cvx <= max_cv and cvy <= max_cv
+        # 大圖章只有 6～7 顆時，間距必須很穩（恐龍）；罌粟連枝勿誤判
+        if nn_cv <= 0.20 and len(points) >= 6:
+            return True
+        if cvx <= max_cv and cvy <= max_cv:
+            return True
+        # 大花過少時改看全部質心
 
     min_sep = max(10.0, float(np.sqrt(max(med, 1.0))) * 0.35)
     cvx = _centroid_axis_gap_cv([cx for _, cx, _ in cents], w, min_sep)
@@ -545,13 +550,13 @@ def looks_like_regular_lattice(
     if cvx <= max_cv and cvy <= max_cv:
         return True
     nn_cv = _nn_spacing_cv([(cy, cx) for cy, cx, _ in cents])
-    return nn_cv <= max_cv * 0.85 and len(cents) >= 12
+    return nn_cv <= max_cv * 0.50 and len(cents) >= 12
 
 
 def _detect_stagger(
     cents: list[tuple[float, float, int]], med: float
 ) -> bool:
-    if len(cents) < 8:
+    if len(cents) < 6:
         return False
     min_sep = max(10.0, float(np.sqrt(max(med, 1.0))) * 0.35)
     ys_all = sorted(cy for cy, _, _ in cents)
@@ -645,8 +650,7 @@ def _detect_color_period_2x(
                 nn_diffs.append(best_cd)
         if len(nn_diffs) >= 8 and float(np.median(nn_diffs)) > 28.0:
             dualish = True
-    if dualish:
-        return True, True
+    # 多物種圖章色方差也會高，不可直接 2×；改看軸向上是否真的隔顆換色
 
     def _axis_need(along_x: bool) -> bool:
         diffs: list[float] = []
@@ -1292,6 +1296,26 @@ def _join_continuity_penalty(tile: np.ndarray) -> float:
     return max(0.0, jx / ix - 1.3) * 12.0 + max(0.0, jy / iy - 1.3) * 12.0
 
 
+def _rolled_interior_join_penalty(tile: np.ndarray, ox: int, oy: int) -> float:
+    """np.roll 後原圖對邊接到畫面中間；量那條內部接縫相對內部的跳變。"""
+    a = tile.astype(np.float64)
+    h, w = a.shape[:2]
+    if h < 16 or w < 16:
+        return 0.0
+    pen = 0.0
+    if oy % h != 0:
+        yj = (-int(oy)) % h
+        jy = float(np.mean(np.abs(a[yj] - a[(yj - 1) % h])))
+        iy = float(np.mean(np.abs(a[h // 2] - a[h // 2 - 1]))) + 1e-6
+        pen += max(0.0, jy / iy - 1.3) * 12.0
+    if ox % w != 0:
+        xj = (-int(ox)) % w
+        jx = float(np.mean(np.abs(a[:, xj] - a[:, (xj - 1) % w])))
+        ix = float(np.mean(np.abs(a[:, w // 2] - a[:, w // 2 - 1]))) + 1e-6
+        pen += max(0.0, jx / ix - 1.3) * 12.0
+    return pen
+
+
 def try_discrete_lattice_crop(
     arr: np.ndarray,
     bg: Sequence[int],
@@ -1334,8 +1358,9 @@ def try_discrete_lattice_crop(
     groups = _dual_scale_groups(cents_all)
     if groups is not None:
         large, _small = groups
-        # 大花過少（柯基+碎星心）：勿只拿 8 點估週期，否則易 2× 半幅假週期
-        if len(large) < 12:
+        # 大花過少（柯基+碎星心）：勿只拿很少點估週期，否則易 2× 半幅假週期
+        # 恐龍等 6～11 個大圖章仍足以估磚縫週期
+        if len(large) < 6:
             groups = None
             cents_pitch = cents_all
             med_pitch = med
@@ -1368,8 +1393,10 @@ def try_discrete_lattice_crop(
     pitch_pts = [(cy, cx) for cy, cx, _ in cents_pitch]
     pitch_x, pitch_y = _correct_half_pitch(pitch_x, pitch_y, pitch_pts)
     nn_pitch = _nn_median_spacing(pitch_pts)
+    # 須先判交錯：六角圓點列距常 ≈ 0.69×NN，不可改成對角線距離
+    stagger = _detect_stagger(cents_pitch, med_pitch)
     # 軸向週期仍遠小於最近鄰：改用 NN（骨頭／色點會把軸投影拉成 20～40px）
-    if nn_pitch >= 64.0:
+    if nn_pitch >= 64.0 and not stagger:
         if pitch_x > 0 and pitch_x < nn_pitch * 0.72:
             pitch_x = nn_pitch
         if pitch_y > 0 and pitch_y < nn_pitch * 0.72:
@@ -1378,24 +1405,25 @@ def try_discrete_lattice_crop(
     min_pitch = max(64.0, float(np.sqrt(max(med_pitch, 1.0))) * 1.5)
     if nn_pitch >= 40:
         min_pitch = max(min_pitch, nn_pitch * 0.6)
-    if pitch_x > 0 and pitch_x < min_pitch:
-        # 拉到接近 NN，避免 ceil(min/p)*p 過頭（例 170→340 但 NN=267）
-        target = nn_pitch if nn_pitch >= min_pitch else min_pitch
-        mul = max(1, int(round(target / max(pitch_x, 1e-6))))
-        cand = pitch_x * float(mul)
-        if cand < min_pitch * 0.85:
-            mul = max(2, int(np.ceil(min_pitch / max(pitch_x, 1e-6))))
+    # 交錯格列距／半偏移略低於 min_pitch 時不要加倍；矩形單元改走 2×
+    if not stagger:
+        if pitch_x > 0 and pitch_x < min_pitch:
+            # 拉到接近 NN，避免 ceil(min/p)*p 過頭（例 170→340 但 NN=267）
+            target = nn_pitch if nn_pitch >= min_pitch else min_pitch
+            mul = max(1, int(round(target / max(pitch_x, 1e-6))))
             cand = pitch_x * float(mul)
-        pitch_x = cand
-    if pitch_y > 0 and pitch_y < min_pitch:
-        target = nn_pitch if nn_pitch >= min_pitch else min_pitch
-        mul = max(1, int(round(target / max(pitch_y, 1e-6))))
-        cand = pitch_y * float(mul)
-        if cand < min_pitch * 0.85:
-            mul = max(2, int(np.ceil(min_pitch / max(pitch_y, 1e-6))))
+            if cand < min_pitch * 0.85:
+                mul = max(2, int(np.ceil(min_pitch / max(pitch_x, 1e-6))))
+                cand = pitch_x * float(mul)
+            pitch_x = cand
+        if pitch_y > 0 and pitch_y < min_pitch:
+            target = nn_pitch if nn_pitch >= min_pitch else min_pitch
+            mul = max(1, int(round(target / max(pitch_y, 1e-6))))
             cand = pitch_y * float(mul)
-        pitch_y = cand
-    stagger = _detect_stagger(cents_pitch, med_pitch)
+            if cand < min_pitch * 0.85:
+                mul = max(2, int(np.ceil(min_pitch / max(pitch_y, 1e-6))))
+                cand = pitch_y * float(mul)
+            pitch_y = cand
     c2x, c2y = _detect_color_period_2x(arr, cents_all, bg, threshold)
     # 週期已接近半幅時禁止再 2×（不規則散點／已是完整色週期）
     if c2x or c2y:
@@ -1412,10 +1440,15 @@ def try_discrete_lattice_crop(
     sizes_y2: list[tuple[int, int]] = []
     # 交錯或雙尺度大花：一律保留 2× 週期候選，避免半週期假通過
     if (stagger or groups is not None) and not (c2x or c2y):
-        sizes_x2 = _float_period_sizes(w, pitch_x * 2.0)
-        sizes_y2 = _float_period_sizes(h, pitch_y * 2.0)
+        # 大 pitch 的 2 週期常略低於預設 0.72 覆蓋；交錯仍必須用 2× 矩形單元
+        cover2 = 0.50 if stagger else 0.72
+        sizes_x2 = _float_period_sizes(w, pitch_x * 2.0, min_cover=cover2)
+        sizes_y2 = _float_period_sizes(h, pitch_y * 2.0, min_cover=cover2)
     if not sizes_x or not sizes_y:
-        return None, "無週期候選", 2, None
+        if sizes_x2 and sizes_y2:
+            sizes_x, sizes_y = sizes_x2, sizes_y2
+        else:
+            return None, "無週期候選", 2, None
 
     # 質心空隙作種子偏移（用浮點 pitch 取模，避免 round 後差 3～5px 切到圖案）
     ipx = max(1, int(round(pitch_x if not (c2x or c2y) else pitch_x)))
@@ -1448,7 +1481,9 @@ def try_discrete_lattice_crop(
 
     if sizes_x2 and sizes_y2:
         _append_pairs(sizes_x2, sizes_y2)
-    _append_pairs(sizes_x, sizes_y)
+    # 交錯已有 2× 矩形單元時不要再搜 1×（半週期會把交錯列拼成方格／花生點）
+    if not (stagger and sizes_x2 and sizes_y2):
+        _append_pairs(sizes_x, sizes_y)
     # 去重
     uniq_pairs: list[tuple[int, int, int, int]] = []
     seen_sz: set[tuple[int, int]] = set()
@@ -1968,9 +2003,15 @@ def try_make_discrete_seamless(
                 best_k = _rk(
                     best_full, med_use=med_rank, cut_use=cut_rank
                 )
+                join_pen = _rolled_interior_join_penalty(best_full, ox_f, oy_f)
+                if join_pen >= 6.0:
+                    best_k = (max(best_k[0], 1) + 1, best_k[1] + join_pen * 4.0)
                 candidates.append((best_k, best_full, "點綴質心相位"))
             else:
                 best_k = _rk(best_r)
+                join_pen = _rolled_interior_join_penalty(best_r, best_ox, best_oy)
+                if join_pen >= 6.0:
+                    best_k = (max(best_k[0], 1) + 1, best_k[1] + join_pen * 4.0)
                 candidates.append((best_k, best_r, "點綴質心相位"))
 
     # 原圖候選：大圖用縮圖打分，勝出仍回傳原解析度

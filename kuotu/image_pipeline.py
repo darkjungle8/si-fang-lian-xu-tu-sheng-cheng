@@ -159,7 +159,8 @@ def prepare_for_expand(img: Image.Image) -> Image.Image:
 
 
 def build_tiled_canvas(src: Image.Image, target_w: int, target_h: int) -> Image.Image:
-    mode = src.mode if src.mode in ("RGB", "RGBA", "L") else "RGB"
+    # CMYK 要原樣留著：轉成 RGB 等於把印刷稿的色域壓掉，回不去了
+    mode = src.mode if src.mode in ("RGB", "RGBA", "L", "CMYK") else "RGB"
     if src.mode != mode:
         src = src.convert(mode)
     canvas = Image.new(mode, (target_w, target_h))
@@ -183,10 +184,13 @@ def add_double_border(
     prepared = prepare_for_expand(img)
     white_px = cm_to_px(white_cm, dpi)
     black_px = cm_to_px(black_cm, dpi)
+    # CMYK 的白是四色歸零、黑是滿版黑版；用色名字串會被當成 RGB 解讀
+    white = (0, 0, 0, 0) if prepared.mode == "CMYK" else "white"
+    black = (0, 0, 0, 255) if prepared.mode == "CMYK" else "black"
     if white_px:
-        prepared = ImageOps.expand(prepared, border=white_px, fill="white")
+        prepared = ImageOps.expand(prepared, border=white_px, fill=white)
     if black_px:
-        prepared = ImageOps.expand(prepared, border=black_px, fill="black")
+        prepared = ImageOps.expand(prepared, border=black_px, fill=black)
     return prepared
 
 
@@ -411,19 +415,37 @@ def _under(path: Path, root: Path) -> bool:
 
 
 def save_expanded_image(image: Image.Image, dest: Path, dpi: float) -> None:
-    """依副檔名輸出 PNG / JPEG / TIFF；未指定或未知副檔名時預設 TIFF。"""
+    """
+    依副檔名輸出 PNG / JPEG / TIFF；未指定或未知副檔名時預設 TIFF。
+
+    內嵌的 ICC profile 一路帶到最終檔。少了它，印刷端拿到的是一張沒有
+    色彩身分的圖，只能用預設 profile 猜，那就是色差的來源。
+    PNG 存不了 CMYK，只有這種組合才轉 RGB。
+    """
     suffix = dest.suffix.lower()
     dest.parent.mkdir(parents=True, exist_ok=True)
+    icc = image.info.get("icc_profile")
+    extra = {"icc_profile": icc} if icc else {}
+
     if suffix in {".jpg", ".jpeg"}:
-        image.convert("RGB").save(dest, format="JPEG", quality=95, dpi=(dpi, dpi))
+        if image.mode not in ("RGB", "L", "CMYK"):
+            image = image.convert("RGB")
+        image.save(
+            dest, format="JPEG", quality=95, subsampling=0, dpi=(dpi, dpi), **extra
+        )
         return
     if suffix == ".png":
-        image.save(dest, format="PNG", dpi=(dpi, dpi))
+        if image.mode == "CMYK":
+            image = image.convert("RGB")
+            extra = {}
+        image.save(dest, format="PNG", dpi=(dpi, dpi), **extra)
         return
     if suffix in {".tif", ".tiff", ""}:
         if not suffix:
             dest = dest.with_suffix(".tif")
-        image.save(dest, format="TIFF", dpi=(dpi, dpi), compression="tiff_lzw")
+        image.save(
+            dest, format="TIFF", dpi=(dpi, dpi), compression="tiff_lzw", **extra
+        )
         return
     raise ValueError(f"不支援的輸出格式：{suffix}（請用 .png / .jpg / .tif）")
 
@@ -458,8 +480,9 @@ def process_one(
             dpi = fallback_dpi
 
         img.load()
+        icc = img.info.get("icc_profile")
         prepared = prepare_for_expand(img)
-        if prepared.mode not in ("RGB", "RGBA", "L"):
+        if prepared.mode not in ("RGB", "RGBA", "L", "CMYK"):
             prepared = prepared.convert("RGB")
 
         target_w = cm_to_px(target_w_cm, dpi)
@@ -484,8 +507,10 @@ def process_one(
         cropped = expanded.crop((left, top, right, bottom))
         result = add_double_border(cropped, white_cm=white_cm, black_cm=black_cm, dpi=dpi)
 
-        if result.mode not in ("RGB", "L"):
+        if result.mode not in ("RGB", "L", "CMYK"):
             result = result.convert("RGB")
+        if icc and result.mode == img.mode:
+            result.info["icc_profile"] = icc
 
         save_expanded_image(result, dest, dpi)
 

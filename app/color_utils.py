@@ -2,10 +2,52 @@
 
 from __future__ import annotations
 
+import io
 from typing import Sequence
 
 import numpy as np
 from PIL import Image
+
+
+def to_srgb(image: Image.Image) -> Image.Image:
+    """轉成 sRGB。帶 ICC 的 CMYK／RGB 依內嵌 profile 轉換，避免印刷色域被 PIL 預設公式帶偏。"""
+    if image.mode == "RGBA":
+        return image
+    if image.mode == "L":
+        return image.convert("RGB")
+    icc = image.info.get("icc_profile")
+    if icc and image.mode in ("RGB", "CMYK", "LAB", "YCbCr"):
+        try:
+            from PIL import ImageCms
+
+            src = ImageCms.ImageCmsProfile(io.BytesIO(icc))
+            dst = ImageCms.createProfile("sRGB")
+            converted = ImageCms.profileToProfile(
+                image, src, dst, outputMode="RGB"
+            )
+            if converted is not None:
+                return converted
+        except Exception:
+            pass
+    if image.mode == "RGB":
+        return image
+    return image.convert("RGB")
+
+
+def analysis_rgb(image: Image.Image) -> Image.Image:
+    """
+    背景偵測與圖種分類一律用的不透明三通道 sRGB。
+
+    `to_srgb` 對 RGBA 是原樣回傳的，後面那些 `reshape(-1, 3)` 會直接炸掉。
+    透明區合成到白底：這批稿件的透明處就是留白。
+    """
+    rgb = to_srgb(image)
+    if rgb.mode == "RGBA":
+        base = Image.new("RGBA", rgb.size, (255, 255, 255, 255))
+        return Image.alpha_composite(base, rgb).convert("RGB")
+    if rgb.mode != "RGB":
+        return rgb.convert("RGB")
+    return rgb
 
 
 def sample_corner_background(
@@ -13,7 +55,7 @@ def sample_corner_background(
     sample_size: int = 8,
 ) -> tuple[int, int, int]:
     """從四角取樣中位數作為背景色 (RGB)。"""
-    rgb = image.convert("RGB")
+    rgb = analysis_rgb(image)
     arr = np.asarray(rgb, dtype=np.int32)
     h, w = arr.shape[:2]
     s = max(1, min(sample_size, h // 2, w // 2))
@@ -46,7 +88,7 @@ def detect_majority_background(image: Image.Image, top_k: int = 3) -> tuple[int,
     豹紋等黑斑可佔大面積時，平坦區偏亮部分才是布面底色。
     """
     del top_k
-    rgb = image.convert("RGB")
+    rgb = analysis_rgb(image)
     side = max(80, min(160, max(rgb.size) // 6))
     small = rgb.resize((side, side), Image.Resampling.BILINEAR)
     arr = np.asarray(small, dtype=np.float64)
@@ -77,7 +119,7 @@ def detect_background(
     2) 全圖多數色
     取「與圖面平均色距較小、且邊緣出現較多」者，避免豹紋角落黑點把底色吸成黑色。
     """
-    rgb = image.convert("RGB")
+    rgb = analysis_rgb(image)
     arr = np.asarray(rgb, dtype=np.float64)
     h, w = arr.shape[:2]
     b = max(1, min(border, h // 4, w // 4))

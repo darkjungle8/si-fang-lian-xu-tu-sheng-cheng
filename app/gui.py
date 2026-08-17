@@ -13,7 +13,7 @@ from typing import Callable
 import customtkinter as ctk
 from PIL import Image, ImageTk
 
-from app.color_utils import detect_background, hex_to_rgb, rgb_to_hex
+from app.color_utils import detect_background, hex_to_rgb, rgb_to_hex, to_srgb
 from app.pipeline import (
     SKIP_DIR_NAMES,
     ExpandSettings,
@@ -24,6 +24,7 @@ from app.pipeline import (
     normalize_expand_ext,
     run_full_pipeline,
 )
+from app.color_io import intermediate_suffix, save_image
 from app.processor import make_seamless_hard_cut, tile_2x2_multi
 
 EXPAND_FILETYPES = [
@@ -592,7 +593,7 @@ class SeamlessTileApp(ctk.CTk):
         y = event.y - oy
         if x < 0 or y < 0 or x >= disp_w or y >= disp_h:
             return
-        src = self.source_image.convert("RGB")
+        src = to_srgb(self.source_image)
         px = min(src.width - 1, max(0, int(x / scale)))
         py = min(src.height - 1, max(0, int(y / scale)))
         self._set_bg(src.getpixel((px, py)))
@@ -671,11 +672,14 @@ class SeamlessTileApp(ctk.CTk):
         dest = Path(path)
         if dest.suffix.lower() not in {".tif", ".tiff", ".png", ".jpg", ".jpeg"}:
             dest = dest.with_suffix(ext)
-        tmp = dest.with_name(f"{dest.stem}__unit_tmp.png")
+        assert self.unit_image is not None
+        tmp = dest.with_name(
+            f"{dest.stem}__unit_tmp{intermediate_suffix(self.unit_image)}"
+        )
 
         def worker() -> Path:
             assert self.unit_image is not None
-            self.unit_image.save(tmp)
+            save_image(self.unit_image, tmp)
             try:
                 expand_unit(tmp, dest, expand)
             finally:
@@ -790,10 +794,12 @@ class SeamlessTileApp(ctk.CTk):
                         log=_blog,
                     )
                     dest.parent.mkdir(parents=True, exist_ok=True)
-                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                    with tempfile.NamedTemporaryFile(
+                        suffix=intermediate_suffix(unit), delete=False
+                    ) as tmp:
                         tmp_path = Path(tmp.name)
                     try:
-                        unit.save(tmp_path)
+                        save_image(unit, tmp_path)
                         expand_unit(tmp_path, dest, expand)
                     finally:
                         tmp_path.unlink(missing_ok=True)
@@ -912,7 +918,7 @@ class SeamlessTileApp(ctk.CTk):
         if cw < 10 or ch < 10:
             return
 
-        rgb = image.convert("RGB")
+        rgb = to_srgb(image)
         scale = min(cw / rgb.width, ch / rgb.height, 1.0)
         disp_w = max(1, int(rgb.width * scale))
         disp_h = max(1, int(rgb.height * scale))

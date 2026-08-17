@@ -1,0 +1,1406 @@
+{
+ "100图-1/2 (25).jpg": {
+  "folder": "100图-1",
+  "name": "2 (25).jpg",
+  "mode": "前景 37%｜原稿已無縫（接縫超出 1.6）",
+  "size": [
+   2048,
+   2048
+  ],
+  "src_size": [
+   2048,
+   2048
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 1.63,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.15,
+  "wrap_excess": 1.63,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.06,
+  "elapsed_s": 0.4,
+  "note": "生成圖與原圖差異過大",
+  "errors": []
+ },
+ "100图-1/2 (29).jpg": {
+  "folder": "100图-1",
+  "name": "2 (29).jpg",
+  "mode": "前景 52%｜原圖＋最小誤差切(V帶1686px誤差1.9，H帶774px誤差7.6)｜還原 20.0 縫 0.7",
+  "size": [
+   10356,
+   8904
+  ],
+  "src_size": [
+   12042,
+   9678
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 53.44,
+  "src_internal_excess": 2.0,
+  "src_axis_energy": 0.176,
+  "wrap_excess": 0.73,
+  "internal_excess": 2.21,
+  "fidelity": 1.0,
+  "tone_shift": 0.51,
+  "design_error": 20.0,
+  "elapsed_s": 70.7,
+  "note": "處理卡住",
+  "errors": []
+ },
+ "100图-1/2 (47).jpg": {
+  "folder": "100图-1",
+  "name": "2 (47).jpg",
+  "mode": "前景 25%｜原圖＋最小誤差切(H帶174px誤差0.3)｜還原 1.6 縫 0.3",
+  "size": [
+   4348,
+   4174
+  ],
+  "src_size": [
+   4348,
+   4348
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 4.05,
+  "src_internal_excess": 0.56,
+  "src_axis_energy": 0.276,
+  "wrap_excess": 0.3,
+  "internal_excess": 0.56,
+  "fidelity": 0.98,
+  "tone_shift": 0.46,
+  "design_error": 1.58,
+  "elapsed_s": 25.6,
+  "note": "質心滾動把圓點切成花生形",
+  "errors": []
+ },
+ "100图-1/2 (52).jpg": {
+  "folder": "100图-1",
+  "name": "2 (52).jpg",
+  "mode": "前景 26%｜原稿已無縫（接縫超出 2.0）",
+  "size": [
+   2048,
+   2048
+  ],
+  "src_size": [
+   2048,
+   2048
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 1.95,
+  "src_internal_excess": 1.56,
+  "src_axis_energy": 0.215,
+  "wrap_excess": 1.95,
+  "internal_excess": 1.56,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.0,
+  "elapsed_s": 0.5,
+  "note": "生成圖有問題",
+  "errors": []
+ },
+ "100图-1/2.jpg": {
+  "folder": "100图-1",
+  "name": "2.jpg",
+  "mode": "前景 53%｜原圖＋最小誤差切(V帶402px誤差6.2，H帶104px誤差10.0)｜還原 31.4 縫 0.0",
+  "size": [
+   2472,
+   2486
+  ],
+  "src_size": [
+   2874,
+   2590
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 61.29,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.207,
+  "wrap_excess": 0.0,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.98,
+  "design_error": 31.38,
+  "elapsed_s": 14.9,
+  "note": "假週期加半幅偏移，花被切成十字",
+  "errors": []
+ },
+ "100图-1/3 (24).jpg": {
+  "folder": "100图-1",
+  "name": "3 (24).jpg",
+  "mode": "前景 28%｜原稿已無縫（接縫超出 1.7）",
+  "size": [
+   2048,
+   2048
+  ],
+  "src_size": [
+   2048,
+   2048
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 1.69,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.143,
+  "wrap_excess": 1.69,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.0,
+  "elapsed_s": 0.6,
+  "note": "生成圖有問題",
+  "errors": []
+ },
+ "100图-1/3 (25).jpg": {
+  "folder": "100图-1",
+  "name": "3 (25).jpg",
+  "mode": "前景 26%｜原稿已無縫（接縫超出 0.0）",
+  "size": [
+   2048,
+   2048
+  ],
+  "src_size": [
+   2048,
+   2048
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 0.0,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.208,
+  "wrap_excess": 0.0,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.05,
+  "elapsed_s": 0.4,
+  "note": "生成圖有問題",
+  "errors": []
+ },
+ "100图-1/3 (27).jpg": {
+  "folder": "100图-1",
+  "name": "3 (27).jpg",
+  "mode": "前景 32%｜原稿已無縫（接縫超出 1.6）",
+  "size": [
+   2048,
+   2048
+  ],
+  "src_size": [
+   2048,
+   2048
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 1.61,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.157,
+  "wrap_excess": 1.61,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.0,
+  "elapsed_s": 0.6,
+  "note": "生成圖有問題",
+  "errors": []
+ },
+ "100图-1/3 (36).jpg": {
+  "folder": "100图-1",
+  "name": "3 (36).jpg",
+  "mode": "前景 28%｜原圖＋最小誤差切(V帶454px誤差1.3)｜還原 24.3 縫 0.8",
+  "size": [
+   1610,
+   2048
+  ],
+  "src_size": [
+   2064,
+   2048
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 31.01,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.229,
+  "wrap_excess": 0.78,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 2.01,
+  "design_error": 24.34,
+  "elapsed_s": 22.2,
+  "note": "點綴 FAIL 後仍半幅，圖案切到中央",
+  "errors": []
+ },
+ "100图-1/3 (43).jpg": {
+  "folder": "100图-1",
+  "name": "3 (43).jpg",
+  "mode": "前景 10%｜原稿已無縫（接縫超出 0.0）",
+  "size": [
+   2048,
+   2048
+  ],
+  "src_size": [
+   2048,
+   2048
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 0.0,
+  "src_internal_excess": 4.24,
+  "src_axis_energy": 0.286,
+  "wrap_excess": 0.0,
+  "internal_excess": 4.24,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.06,
+  "elapsed_s": 0.4,
+  "note": "生成圖有問題",
+  "errors": []
+ },
+ "100图-1/3 (51).jpg": {
+  "folder": "100图-1",
+  "name": "3 (51).jpg",
+  "mode": "前景 30%｜原圖｜還原 0.0 縫 3.4",
+  "size": [
+   2048,
+   2048
+  ],
+  "src_size": [
+   2048,
+   2048
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 3.44,
+  "src_internal_excess": 0.45,
+  "src_axis_energy": 0.216,
+  "wrap_excess": 3.44,
+  "internal_excess": 0.45,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.02,
+  "elapsed_s": 14.5,
+  "note": "晶格週期被誤估，邊緣切到字與狗",
+  "errors": []
+ },
+ "100图-1/3.jpg": {
+  "folder": "100图-1",
+  "name": "3.jpg",
+  "mode": "前景 46%｜原圖＋最小誤差切(V帶402px誤差1.7，H帶104px誤差6.6)｜還原 31.1 縫 0.0",
+  "size": [
+   2472,
+   2486
+  ],
+  "src_size": [
+   2874,
+   2590
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 77.55,
+  "src_internal_excess": 3.1,
+  "src_axis_energy": 0.202,
+  "wrap_excess": 0.0,
+  "internal_excess": 2.73,
+  "fidelity": 1.0,
+  "tone_shift": 2.36,
+  "design_error": 31.07,
+  "elapsed_s": 14.1,
+  "note": "soft 混合讓罌粟出現鏡像縫",
+  "errors": []
+ },
+ "100图-1/4 (1).jpg": {
+  "folder": "100图-1",
+  "name": "4 (1).jpg",
+  "mode": "前景 9%｜原圖＋最小誤差切(V帶348px誤差0.1，H帶957px誤差1.7)｜還原 36.3 縫 0.0",
+  "size": [
+   4000,
+   3391
+  ],
+  "src_size": [
+   4348,
+   4348
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 45.16,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.363,
+  "wrap_excess": 0.0,
+  "internal_excess": 0.0,
+  "fidelity": 0.989,
+  "tone_shift": 2.33,
+  "design_error": 36.33,
+  "elapsed_s": 22.7,
+  "note": "點綴 FAIL 後仍半幅，圖案切到中央",
+  "errors": []
+ },
+ "100图-2/1 (10).png": {
+  "folder": "100图-2",
+  "name": "1 (10).png",
+  "mode": "前景 6%｜原圖＋最小誤差切(V帶233px誤差1.7，H帶230px誤差2.3)｜還原 8.5 縫 0.0",
+  "size": [
+   828,
+   815
+  ],
+  "src_size": [
+   1061,
+   1045
+  ],
+  "src_mode": "RGB",
+  "out_mode": "RGB",
+  "keeps_icc": false,
+  "src_wrap_excess": 5.19,
+  "src_internal_excess": 2.44,
+  "src_axis_energy": 0.243,
+  "wrap_excess": 0.0,
+  "internal_excess": 2.44,
+  "fidelity": 0.975,
+  "tone_shift": 0.7,
+  "design_error": 8.49,
+  "elapsed_s": 5.1,
+  "note": "錯切對齊把拼布格扳斜",
+  "errors": []
+ },
+ "100图-2/1 (2).jpg": {
+  "folder": "100图-2",
+  "name": "1 (2).jpg",
+  "mode": "前景 60%｜週期裁切（週期 1052×724px → 單元 4208×3620（偏移 0,1，接縫分 14.80←60.66））＋最小誤差切(V帶589px誤差1.2)｜還原 23.9 縫 0.0",
+  "size": [
+   3619,
+   3620
+  ],
+  "src_size": [
+   4348,
+   4348
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 27.67,
+  "src_internal_excess": 2.06,
+  "src_axis_energy": 0.557,
+  "wrap_excess": 0.03,
+  "internal_excess": 0.14,
+  "fidelity": 0.963,
+  "tone_shift": 0.97,
+  "design_error": 23.87,
+  "elapsed_s": 30.2,
+  "note": "CMYK 未走 ICC 導致條紋偏青；半幅使大象朝向錯亂",
+  "errors": []
+ },
+ "100图-2/1 (20).jpg": {
+  "folder": "100图-2",
+  "name": "1 (20).jpg",
+  "mode": "前景 40%｜原圖＋最小誤差切(V帶258px誤差2.5，H帶204px誤差1.9)｜還原 16.9 縫 0.0",
+  "size": [
+   916,
+   1252
+  ],
+  "src_size": [
+   1174,
+   1456
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 23.28,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.151,
+  "wrap_excess": 0.0,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.35,
+  "design_error": 16.88,
+  "elapsed_s": 7.4,
+  "note": "假週期讓 2×2 中縫出現連體花",
+  "errors": []
+ },
+ "100图-2/1 (28).jpg": {
+  "folder": "100图-2",
+  "name": "1 (28).jpg",
+  "mode": "前景 67%｜原稿已無縫（接縫超出 0.8）",
+  "size": [
+   2048,
+   2048
+  ],
+  "src_size": [
+   2048,
+   2048
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 0.79,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.138,
+  "wrap_excess": 0.79,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.0,
+  "elapsed_s": 0.4,
+  "note": "強制半幅把菱形拼布中央切開",
+  "errors": []
+ },
+ "100图-2/1 (37).jpg": {
+  "folder": "100图-2",
+  "name": "1 (37).jpg",
+  "mode": "前景 35%｜原圖＋最小誤差切(V帶552px誤差5.9，H帶200px誤差7.3)｜還原 44.9 縫 0.0",
+  "size": [
+   1956,
+   2300
+  ],
+  "src_size": [
+   2508,
+   2500
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 16.53,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.172,
+  "wrap_excess": 0.0,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.16,
+  "design_error": 44.93,
+  "elapsed_s": 11.5,
+  "note": "多餘的邊緣柔化造成漿果粉霧",
+  "errors": []
+ },
+ "100图-2/1 (38).jpg": {
+  "folder": "100图-2",
+  "name": "1 (38).jpg",
+  "mode": "前景 7%｜原圖＋最小誤差切(V帶56px誤差0.7)｜還原 1.8 縫 0.5",
+  "size": [
+   1344,
+   2874
+  ],
+  "src_size": [
+   1400,
+   2874
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 8.05,
+  "src_internal_excess": 0.42,
+  "src_axis_energy": 0.22,
+  "wrap_excess": 0.51,
+  "internal_excess": 0.41,
+  "fidelity": 0.995,
+  "tone_shift": 0.4,
+  "design_error": 1.8,
+  "elapsed_s": 12.0,
+  "note": "CMYK 未走 ICC，藍底過飽和",
+  "errors": []
+ },
+ "100图-2/1 (46).jpg": {
+  "folder": "100图-2",
+  "name": "1 (46).jpg",
+  "mode": "前景 23%｜原圖｜還原 0.0 縫 3.1",
+  "size": [
+   2048,
+   2048
+  ],
+  "src_size": [
+   2048,
+   2048
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 3.13,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.129,
+  "wrap_excess": 3.13,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.0,
+  "elapsed_s": 8.8,
+  "note": "半幅把斜枝從畫面中央切斷",
+  "errors": []
+ },
+ "100图-2/1 (71).jpg": {
+  "folder": "100图-2",
+  "name": "1 (71).jpg",
+  "mode": "前景 38%｜原圖＋最小誤差切(V帶348px誤差1.1，H帶348px誤差0.0)｜還原 23.2 縫 0.0",
+  "size": [
+   4000,
+   4000
+  ],
+  "src_size": [
+   4348,
+   4348
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 80.16,
+  "src_internal_excess": 0.04,
+  "src_axis_energy": 0.236,
+  "wrap_excess": 0.0,
+  "internal_excess": 0.07,
+  "fidelity": 0.956,
+  "tone_shift": 1.45,
+  "design_error": 23.18,
+  "elapsed_s": 18.3,
+  "note": "白底恐龍被誤判密花，整張保留後從身體切開",
+  "errors": []
+ },
+ "100图-2/1.jpg": {
+  "folder": "100图-2",
+  "name": "1.jpg",
+  "mode": "前景 31%｜原圖＋最小誤差切(V帶632px誤差2.4，H帶207px誤差2.6)｜還原 26.5 縫 0.0",
+  "size": [
+   2242,
+   2383
+  ],
+  "src_size": [
+   2874,
+   2590
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 34.35,
+  "src_internal_excess": 4.28,
+  "src_axis_energy": 0.185,
+  "wrap_excess": 0.0,
+  "internal_excess": 3.84,
+  "fidelity": 1.0,
+  "tone_shift": 3.3,
+  "design_error": 26.48,
+  "elapsed_s": 17.1,
+  "note": "黑底罌粟：假週期切穿花瓣",
+  "errors": []
+ },
+ "100图-1/ChatGPT Image 2026年8月9日 20_18_08 (4).png": {
+  "folder": "100图-1",
+  "name": "ChatGPT Image 2026年8月9日 20_18_08 (4).png",
+  "mode": "前景 56%｜原稿已無縫（接縫超出 0.0）",
+  "size": [
+   1024,
+   1024
+  ],
+  "src_size": [
+   1024,
+   1024
+  ],
+  "src_mode": "RGB",
+  "out_mode": "RGB",
+  "keeps_icc": false,
+  "src_wrap_excess": 0.0,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.178,
+  "wrap_excess": 0.0,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.0,
+  "elapsed_s": 0.1,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-1/2 (24).jpg": {
+  "folder": "100图-1",
+  "name": "2 (24).jpg",
+  "mode": "前景 15%｜原稿已無縫（接縫超出 0.0）",
+  "size": [
+   2050,
+   2050
+  ],
+  "src_size": [
+   2050,
+   2050
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 0.0,
+  "src_internal_excess": 0.55,
+  "src_axis_energy": 0.217,
+  "wrap_excess": 0.0,
+  "internal_excess": 0.55,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.0,
+  "elapsed_s": 0.4,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-1/3 (5).png": {
+  "folder": "100图-1",
+  "name": "3 (5).png",
+  "mode": "前景 4%｜原稿已無縫（接縫超出 0.0）",
+  "size": [
+   1204,
+   1205
+  ],
+  "src_size": [
+   1204,
+   1205
+  ],
+  "src_mode": "RGB",
+  "out_mode": "RGB",
+  "keeps_icc": false,
+  "src_wrap_excess": 0.0,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.075,
+  "wrap_excess": 0.0,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.02,
+  "elapsed_s": 0.1,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-1/2 (35).jpg": {
+  "folder": "100图-1",
+  "name": "2 (35).jpg",
+  "mode": "前景 48%｜原稿已無縫（接縫超出 0.0）",
+  "size": [
+   2304,
+   2306
+  ],
+  "src_size": [
+   2304,
+   2306
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 0.0,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.156,
+  "wrap_excess": 0.0,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.0,
+  "elapsed_s": 0.4,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-1/2 (25).png": {
+  "folder": "100图-1",
+  "name": "2 (25).png",
+  "mode": "前景 31%｜原稿已無縫（接縫超出 0.0）",
+  "size": [
+   1048,
+   1254
+  ],
+  "src_size": [
+   1048,
+   1254
+  ],
+  "src_mode": "RGB",
+  "out_mode": "RGB",
+  "keeps_icc": false,
+  "src_wrap_excess": 0.0,
+  "src_internal_excess": 5.96,
+  "src_axis_energy": 0.238,
+  "wrap_excess": 0.0,
+  "internal_excess": 5.96,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.04,
+  "elapsed_s": 0.2,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-1/5 (35).jpg": {
+  "folder": "100图-1",
+  "name": "5 (35).jpg",
+  "mode": "前景 29%｜原圖｜還原 0.0 縫 3.2",
+  "size": [
+   2048,
+   2048
+  ],
+  "src_size": [
+   2048,
+   2048
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 3.18,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.229,
+  "wrap_excess": 3.18,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.0,
+  "elapsed_s": 20.7,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-1/2 (56).jpg": {
+  "folder": "100图-1",
+  "name": "2 (56).jpg",
+  "mode": "前景 39%｜原圖｜還原 0.0 縫 2.4",
+  "size": [
+   2048,
+   2048
+  ],
+  "src_size": [
+   2048,
+   2048
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 2.35,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.15,
+  "wrap_excess": 2.35,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.0,
+  "elapsed_s": 9.3,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-1/7 (22).jpg": {
+  "folder": "100图-1",
+  "name": "7 (22).jpg",
+  "mode": "前景 55%｜原稿已無縫（接縫超出 1.9）",
+  "size": [
+   2048,
+   2048
+  ],
+  "src_size": [
+   2048,
+   2048
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 1.9,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.17,
+  "wrap_excess": 1.9,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.0,
+  "elapsed_s": 0.4,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-1/3 (2).png": {
+  "folder": "100图-1",
+  "name": "3 (2).png",
+  "mode": "前景 56%｜原稿已無縫（接縫超出 0.0）",
+  "size": [
+   1614,
+   2049
+  ],
+  "src_size": [
+   1614,
+   2049
+  ],
+  "src_mode": "RGBA",
+  "out_mode": "RGB",
+  "keeps_icc": false,
+  "src_wrap_excess": 0.0,
+  "src_internal_excess": 4.76,
+  "src_axis_energy": 0.151,
+  "wrap_excess": 0.0,
+  "internal_excess": 4.76,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.03,
+  "elapsed_s": 0.2,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-1/2 (58).jpg": {
+  "folder": "100图-1",
+  "name": "2 (58).jpg",
+  "mode": "前景 30%｜原圖｜還原 0.0 縫 2.2",
+  "size": [
+   2048,
+   2048
+  ],
+  "src_size": [
+   2048,
+   2048
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 2.23,
+  "src_internal_excess": 0.69,
+  "src_axis_energy": 0.153,
+  "wrap_excess": 2.23,
+  "internal_excess": 0.69,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.0,
+  "elapsed_s": 49.4,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-1/ChatGPT Image 2026年8月9日 20_15_29 (3).png": {
+  "folder": "100图-1",
+  "name": "ChatGPT Image 2026年8月9日 20_15_29 (3).png",
+  "mode": "前景 57%｜原稿已無縫（接縫超出 0.9）",
+  "size": [
+   1254,
+   1254
+  ],
+  "src_size": [
+   1254,
+   1254
+  ],
+  "src_mode": "RGB",
+  "out_mode": "RGB",
+  "keeps_icc": false,
+  "src_wrap_excess": 0.91,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.166,
+  "wrap_excess": 0.91,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.04,
+  "elapsed_s": 0.1,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-1/2 (57).jpg": {
+  "folder": "100图-1",
+  "name": "2 (57).jpg",
+  "mode": "前景 24%｜原圖｜還原 0.0 縫 4.6",
+  "size": [
+   2048,
+   2048
+  ],
+  "src_size": [
+   2048,
+   2048
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 4.6,
+  "src_internal_excess": 2.05,
+  "src_axis_energy": 0.242,
+  "wrap_excess": 4.6,
+  "internal_excess": 2.05,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.0,
+  "elapsed_s": 9.8,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-1/3 (1).jpg": {
+  "folder": "100图-1",
+  "name": "3 (1).jpg",
+  "mode": "前景 31%｜原稿已無縫（接縫超出 0.3）",
+  "size": [
+   1550,
+   2380
+  ],
+  "src_size": [
+   1550,
+   2380
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 0.32,
+  "src_internal_excess": 0.26,
+  "src_axis_energy": 0.055,
+  "wrap_excess": 0.32,
+  "internal_excess": 0.26,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.0,
+  "elapsed_s": 0.3,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-1/6 (13).jpg": {
+  "folder": "100图-1",
+  "name": "6 (13).jpg",
+  "mode": "前景 27%｜原圖＋最小誤差切(V帶2649px誤差0.0，H帶774px誤差3.5)｜還原 18.3 縫 0.0",
+  "size": [
+   9393,
+   8904
+  ],
+  "src_size": [
+   12042,
+   9678
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 39.85,
+  "src_internal_excess": 1.16,
+  "src_axis_energy": 0.196,
+  "wrap_excess": 0.0,
+  "internal_excess": 0.99,
+  "fidelity": 1.0,
+  "tone_shift": 0.08,
+  "design_error": 18.27,
+  "elapsed_s": 79.2,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-1/7 (5).png": {
+  "folder": "100图-1",
+  "name": "7 (5).png",
+  "mode": "前景 25%｜原稿已無縫（接縫超出 0.0）",
+  "size": [
+   1254,
+   1254
+  ],
+  "src_size": [
+   1254,
+   1254
+  ],
+  "src_mode": "RGB",
+  "out_mode": "RGB",
+  "keeps_icc": false,
+  "src_wrap_excess": 0.0,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.176,
+  "wrap_excess": 0.0,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.0,
+  "elapsed_s": 0.2,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-2/1 (82).jpg": {
+  "folder": "100图-2",
+  "name": "1 (82).jpg",
+  "mode": "前景 18%｜原圖｜還原 0.0 縫 2.5",
+  "size": [
+   1024,
+   1026
+  ],
+  "src_size": [
+   1024,
+   1026
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 2.51,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.194,
+  "wrap_excess": 2.51,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.0,
+  "elapsed_s": 6.2,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-2/1 (84).jpg": {
+  "folder": "100图-2",
+  "name": "1 (84).jpg",
+  "mode": "前景 34%｜原圖＋最小誤差切(V帶142px誤差0.3)｜還原 17.3 縫 0.0",
+  "size": [
+   1628,
+   2048
+  ],
+  "src_size": [
+   1770,
+   2048
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 74.8,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.281,
+  "wrap_excess": 0.0,
+  "internal_excess": 0.0,
+  "fidelity": 0.871,
+  "tone_shift": 1.66,
+  "design_error": 17.26,
+  "elapsed_s": 10.6,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-2/1 (19).png": {
+  "folder": "100图-2",
+  "name": "1 (19).png",
+  "mode": "前景 37%｜原稿已無縫（接縫超出 0.0）",
+  "size": [
+   2048,
+   2048
+  ],
+  "src_size": [
+   2048,
+   2048
+  ],
+  "src_mode": "RGB",
+  "out_mode": "RGB",
+  "keeps_icc": false,
+  "src_wrap_excess": 0.0,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.241,
+  "wrap_excess": 0.0,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.02,
+  "elapsed_s": 0.2,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-2/2 (4).jpg": {
+  "folder": "100图-2",
+  "name": "2 (4).jpg",
+  "mode": "前景 37%｜原稿已無縫（接縫超出 0.4）",
+  "size": [
+   2048,
+   2048
+  ],
+  "src_size": [
+   2048,
+   2048
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 0.42,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.214,
+  "wrap_excess": 0.42,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.0,
+  "elapsed_s": 0.6,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-2/1 (51).jpg": {
+  "folder": "100图-2",
+  "name": "1 (51).jpg",
+  "mode": "前景 19%｜原稿已無縫（接縫超出 0.3）",
+  "size": [
+   2048,
+   2048
+  ],
+  "src_size": [
+   2048,
+   2048
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 0.25,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.214,
+  "wrap_excess": 0.25,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.01,
+  "elapsed_s": 0.6,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-2/1 (86).jpg": {
+  "folder": "100图-2",
+  "name": "1 (86).jpg",
+  "mode": "前景 28%｜原稿已無縫（接縫超出 1.5）",
+  "size": [
+   2048,
+   2048
+  ],
+  "src_size": [
+   2048,
+   2048
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 1.52,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.185,
+  "wrap_excess": 1.52,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.0,
+  "elapsed_s": 0.6,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-2/1 (9).jpg": {
+  "folder": "100图-2",
+  "name": "1 (9).jpg",
+  "mode": "前景 27%｜原稿已無縫（接縫超出 0.2）",
+  "size": [
+   2048,
+   2048
+  ],
+  "src_size": [
+   2048,
+   2048
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 0.2,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.225,
+  "wrap_excess": 0.2,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.05,
+  "elapsed_s": 0.5,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-2/1 (21).jpg": {
+  "folder": "100图-2",
+  "name": "1 (21).jpg",
+  "mode": "前景 18%｜原稿已無縫（接縫超出 0.5）",
+  "size": [
+   684,
+   974
+  ],
+  "src_size": [
+   684,
+   974
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 0.5,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.232,
+  "wrap_excess": 0.5,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.0,
+  "elapsed_s": 0.1,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-2/2 (19).png": {
+  "folder": "100图-2",
+  "name": "2 (19).png",
+  "mode": "前景 6%｜原稿已無縫（接縫超出 0.0）",
+  "size": [
+   1254,
+   1254
+  ],
+  "src_size": [
+   1254,
+   1254
+  ],
+  "src_mode": "RGB",
+  "out_mode": "RGB",
+  "keeps_icc": false,
+  "src_wrap_excess": 0.0,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.204,
+  "wrap_excess": 0.0,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.05,
+  "elapsed_s": 0.1,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-2/1 (52).jpg": {
+  "folder": "100图-2",
+  "name": "1 (52).jpg",
+  "mode": "前景 99%｜原稿已無縫（接縫超出 0.0）",
+  "size": [
+   1400,
+   1400
+  ],
+  "src_size": [
+   1400,
+   1400
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 0.0,
+  "src_internal_excess": 30.06,
+  "src_axis_energy": 0.306,
+  "wrap_excess": 0.0,
+  "internal_excess": 30.06,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.0,
+  "elapsed_s": 0.2,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-2/1 (18).png": {
+  "folder": "100图-2",
+  "name": "1 (18).png",
+  "mode": "前景 81%｜原圖＋最小誤差切(H帶100px誤差4.5)｜還原 6.9 縫 0.0",
+  "size": [
+   1254,
+   1145
+  ],
+  "src_size": [
+   1254,
+   1245
+  ],
+  "src_mode": "RGB",
+  "out_mode": "RGB",
+  "keeps_icc": false,
+  "src_wrap_excess": 24.55,
+  "src_internal_excess": 11.67,
+  "src_axis_energy": 0.314,
+  "wrap_excess": 0.0,
+  "internal_excess": 11.67,
+  "fidelity": 0.999,
+  "tone_shift": 0.06,
+  "design_error": 6.92,
+  "elapsed_s": 8.0,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-2/1 (1).png": {
+  "folder": "100图-2",
+  "name": "1 (1).png",
+  "mode": "前景 48%｜原稿已無縫（接縫超出 0.0）",
+  "size": [
+   736,
+   989
+  ],
+  "src_size": [
+   736,
+   989
+  ],
+  "src_mode": "RGB",
+  "out_mode": "RGB",
+  "keeps_icc": false,
+  "src_wrap_excess": 0.0,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.153,
+  "wrap_excess": 0.0,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.0,
+  "elapsed_s": 0.0,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-2/1 (4).png": {
+  "folder": "100图-2",
+  "name": "1 (4).png",
+  "mode": "前景 46%｜原稿已無縫（接縫超出 0.0）",
+  "size": [
+   1096,
+   886
+  ],
+  "src_size": [
+   1096,
+   886
+  ],
+  "src_mode": "RGB",
+  "out_mode": "RGB",
+  "keeps_icc": false,
+  "src_wrap_excess": 0.0,
+  "src_internal_excess": 60.68,
+  "src_axis_energy": 0.365,
+  "wrap_excess": 0.0,
+  "internal_excess": 60.68,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.03,
+  "elapsed_s": 0.1,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-2/2 - 副本.jpg": {
+  "folder": "100图-2",
+  "name": "2 - 副本.jpg",
+  "mode": "前景 54%｜原稿已無縫（接縫超出 0.9）",
+  "size": [
+   2048,
+   2048
+  ],
+  "src_size": [
+   2048,
+   2048
+  ],
+  "src_mode": "CMYK",
+  "out_mode": "CMYK",
+  "keeps_icc": true,
+  "src_wrap_excess": 0.9,
+  "src_internal_excess": 0.0,
+  "src_axis_energy": 0.153,
+  "wrap_excess": 0.9,
+  "internal_excess": 0.0,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.04,
+  "elapsed_s": 0.4,
+  "note": "抽樣",
+  "errors": []
+ },
+ "100图-2/1 (20).png": {
+  "folder": "100图-2",
+  "name": "1 (20).png",
+  "mode": "前景 9%｜原稿已無縫（接縫超出 0.0）",
+  "size": [
+   1252,
+   1254
+  ],
+  "src_size": [
+   1252,
+   1254
+  ],
+  "src_mode": "RGB",
+  "out_mode": "RGB",
+  "keeps_icc": false,
+  "src_wrap_excess": 0.0,
+  "src_internal_excess": 0.12,
+  "src_axis_energy": 0.225,
+  "wrap_excess": 0.0,
+  "internal_excess": 0.12,
+  "fidelity": 1.0,
+  "tone_shift": 0.0,
+  "design_error": 0.06,
+  "elapsed_s": 0.2,
+  "note": "抽樣",
+  "errors": []
+ }
+}

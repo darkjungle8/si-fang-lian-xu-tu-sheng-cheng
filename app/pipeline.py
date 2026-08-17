@@ -9,6 +9,7 @@ from typing import Callable
 
 from PIL import Image
 
+from app.color_io import intermediate_suffix, save_image
 from app.color_utils import detect_background
 from app.paths import ensure_kuotu_on_path
 from app.processor import make_seamless_hard_cut, tile_2x2_multi
@@ -230,10 +231,14 @@ def _process_one_image(
         if expand_dest is None:
             raise ValueError("擴圖輸出路徑未指定")
         expand_dest.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        # 中間檔跟著單元圖的色彩空間走：PNG 存不了 CMYK，硬存會把印刷稿
+        # 降級成 RGB，等於在流水線中途製造色偏
+        with tempfile.NamedTemporaryFile(
+            suffix=intermediate_suffix(unit), delete=False
+        ) as tmp:
             tmp_path = Path(tmp.name)
         try:
-            unit.save(tmp_path)
+            save_image(unit, tmp_path)
             expand_unit(tmp_path, expand_dest, expand, log=log)
             item.expand_path = str(expand_dest)
         finally:
@@ -242,8 +247,7 @@ def _process_one_image(
         # 未開擴圖時，最終結果就是單元圖
         if expand_dest is None:
             raise ValueError("輸出路徑未指定")
-        expand_dest.parent.mkdir(parents=True, exist_ok=True)
-        unit.save(expand_dest)
+        save_image(unit, expand_dest)
         item.unit_path = str(expand_dest)
         item.expand_path = str(expand_dest)
 
