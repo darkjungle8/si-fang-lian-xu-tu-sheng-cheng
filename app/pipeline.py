@@ -70,6 +70,16 @@ def mirror_dest(src: Path, src_root: Path, out_root: Path, *, name: str | None =
     return out_root / rel.parent / dest_name
 
 
+def expand_output_name(src: Path, expand_ext: str) -> str:
+    """
+    批次擴圖檔名：保留來源副檔名，避免 2 (21).jpg 與 2 (21).png
+    都變成 2 (21).tif 而互相覆蓋。
+    例：2 (21).jpg + .tif → 2 (21).jpg.tif
+    """
+    ext = expand_ext if expand_ext.startswith(".") else f".{expand_ext}"
+    return f"{src.name}{ext}"
+
+
 @dataclass
 class ExpandSettings:
     dpi: float = 300.0
@@ -210,6 +220,7 @@ def _process_one_image(
         margin=margin,
         threshold=threshold,
         margin_is_percent=margin_is_percent,
+        log=log,
     )
     # 仍跑 2×2 僅為模式說明；不寫入磁碟
     _, preview_detail, _ = tile_2x2_multi(unit)
@@ -300,7 +311,27 @@ def run_full_pipeline(
     total = len(files)
 
     for i, path in enumerate(files):
-        dest = mirror_dest(path, input_dir, out, name=f"{path.stem}{expand_ext}")
+        dest = mirror_dest(
+            path, input_dir, out, name=expand_output_name(path, expand_ext)
+        )
+        if dest.exists():
+            try:
+                rel_label = str(path.relative_to(input_dir))
+            except ValueError:
+                rel_label = path.name
+            log(f"  [{i + 1}/{total}] {rel_label} 跳過（輸出已存在）")
+            results.append(
+                PipelineItemResult(
+                    source=str(path),
+                    unit_path=None,
+                    preview_path=None,
+                    expand_path=str(dest),
+                    mode="跳過（已存在）",
+                )
+            )
+            if on_progress is not None:
+                on_progress((i + 1) / total)
+            continue
         try:
             item = _process_one_image(
                 path,
@@ -409,7 +440,9 @@ def _run_sku_pipeline(
         )
         sku_out = out / folder_name
         for src in files:
-            dest = mirror_dest(src, sku_dir, sku_out, name=f"{src.stem}{expand_ext}")
+            dest = mirror_dest(
+                src, sku_dir, sku_out, name=expand_output_name(src, expand_ext)
+            )
             jobs.append((src, dest, sku_dir, sku, crop_w_cm, crop_h_cm))
 
     log(f"輸入父目錄：{parent_dir}")
@@ -433,6 +466,23 @@ def _run_sku_pipeline(
             rel_label = str(src.relative_to(sku_dir.parent))
         except ValueError:
             rel_label = f"{src.parent.name}/{src.name}"
+        if dest.exists():
+            log(f"  [{i}/{total}] {rel_label} 跳過（輸出已存在）")
+            results.append(
+                PipelineItemResult(
+                    source=str(src),
+                    unit_path=None,
+                    preview_path=None,
+                    expand_path=str(dest),
+                    mode="跳過（已存在）",
+                    sku=sku,
+                    crop_w_cm=crop_w_cm,
+                    crop_h_cm=crop_h_cm,
+                )
+            )
+            if on_progress is not None:
+                on_progress(i / total)
+            continue
         try:
             item = _process_one_image(
                 src,

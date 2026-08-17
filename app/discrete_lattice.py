@@ -2,13 +2,69 @@
 
 from __future__ import annotations
 
-from typing import Sequence
+import time
+from typing import Callable, Sequence
 
 import cv2
 import numpy as np
 from PIL import Image
 
 from app.color_utils import color_distance
+
+# 超過此邊長時，晶格搜尋改在縮圖上做，再映射回原圖裁切（不放寬接縫標準）
+_DISCRETE_ANALYSIS_MAX_SIDE = 2048
+_DISCRETE_FULLRES_TRIGGER = 2800
+
+
+def _downscale_for_discrete_analysis(
+    arr: np.ndarray,
+    max_side: int = _DISCRETE_ANALYSIS_MAX_SIDE,
+) -> tuple[np.ndarray, float]:
+    """回傳 (縮圖, full/small 比例)。"""
+    h, w = arr.shape[:2]
+    m = max(h, w)
+    if m <= max_side:
+        return arr, 1.0
+    scale = m / float(max_side)
+    nw = max(64, int(round(w / scale)))
+    nh = max(64, int(round(h / scale)))
+    small = np.asarray(
+        Image.fromarray(arr).resize((nw, nh), Image.Resampling.BILINEAR)
+    )
+    return small, float(w) / float(small.shape[1])
+
+
+def _map_lattice_box_to_full(
+    dx: int,
+    dy: int,
+    cw: int,
+    ch: int,
+    px: int,
+    py: int,
+    scale: float,
+    full_h: int,
+    full_w: int,
+) -> tuple[int, int, int, int, int, int]:
+    """把縮圖裁切框映射回原圖，並把尺寸 snap 到整數倍週期。"""
+    px_f = max(8, int(round(px * scale)))
+    py_f = max(8, int(round(py * scale)))
+    dx_f = int(round(dx * scale))
+    dy_f = int(round(dy * scale))
+    cw_f = int(round(cw * scale))
+    ch_f = int(round(ch * scale))
+    if px_f > 0:
+        cw_f = max(px_f, int(round(cw_f / px_f)) * px_f)
+    if py_f > 0:
+        ch_f = max(py_f, int(round(ch_f / py_f)) * py_f)
+    cw_f = min(cw_f, full_w)
+    ch_f = min(ch_f, full_h)
+    if px_f > 0:
+        cw_f = max(px_f, (cw_f // px_f) * px_f)
+    if py_f > 0:
+        ch_f = max(py_f, (ch_f // py_f) * py_f)
+    dx_f = min(max(0, dx_f), max(0, full_w - cw_f))
+    dy_f = min(max(0, dy_f), max(0, full_h - ch_f))
+    return dx_f, dy_f, cw_f, ch_f, px_f, py_f
 
 
 def _fg_mask(arr: np.ndarray, bg: Sequence[int], threshold: float) -> np.ndarray:
@@ -33,23 +89,35 @@ def _merge_nearby_centroids(
     """合併過近質心（花圈碎裂常留下 2～5px 雙心）。"""
     if len(cents) < 2 or min_dist < 2:
         return list(cents)
-    remaining = sorted(cents, key=lambda t: -t[2])
+    order = sorted(range(len(cents)), key=lambda i: -cents[i][2])
+    ys = np.array([cents[i][0] for i in order], dtype=np.float64)
+    xs = np.array([cents[i][1] for i in order], dtype=np.float64)
+    areas = np.array([cents[i][2] for i in order], dtype=np.float64)
+    alive = np.ones(len(order), dtype=bool)
     out: list[tuple[float, float, int]] = []
-    while remaining:
-        cy, cx, area = remaining.pop(0)
-        wsum = float(area)
-        y = cy * wsum
-        x = cx * wsum
-        kept: list[tuple[float, float, int]] = []
-        for cy2, cx2, a2 in remaining:
-            if float(np.hypot(cy - cy2, cx - cx2)) <= min_dist:
-                w = float(a2)
-                y += cy2 * w
-                x += cx2 * w
-                wsum += w
-            else:
-                kept.append((cy2, cx2, a2))
-        remaining = kept
+    md2 = float(min_dist) * float(min_dist)
+    for i in range(len(order)):
+        if not alive[i]:
+            continue
+        mask = alive.copy()
+        mask[i] = False
+        if np.any(mask):
+            dy = ys[mask] - ys[i]
+            dx = xs[mask] - xs[i]
+            near = (dy * dy + dx * dx) <= md2
+            idx = np.flatnonzero(mask)[near]
+        else:
+            idx = np.empty(0, dtype=np.int64)
+        wsum = float(areas[i])
+        y = float(ys[i]) * wsum
+        x = float(xs[i]) * wsum
+        for j in idx:
+            w = float(areas[j])
+            y += float(ys[j]) * w
+            x += float(xs[j]) * w
+            wsum += w
+            alive[j] = False
+        alive[i] = False
         out.append((y / wsum, x / wsum, int(round(wsum))))
     return out
 
@@ -116,7 +184,7 @@ def _fg_mask_merged(
     if raw_dual is not None and not force_close:
         best_score, _ = _dual_lattice_quality(raw_dual[0])
 
-    for k in (3, 5, 7, 9, 11, 15, 21):
+    for k in (5, 9, 15, 21):
         if k > max_close:
             break
         ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
@@ -165,12 +233,15 @@ def _motif_centroids_for_gap(
     bg: Sequence[int],
     threshold: float,
     med: float | None = None,
-) -> tuple[list[tuple[float, float, int]], float]:
+    fg_merged: np.ndarray | None = None,
+) -> tuple[list[tuple[float, float, int]], float, np.ndarray]:
     """
     間距／節奏用質心：合併碎塊後，雙尺度只取大花。
     避免小碎花把跨縫間距誤判成 ≈2。
+    第三回傳值為合併後 mask，供 _rank_tile 重用。
+    fg_merged：可傳入已算好的合併 mask（裁切搜尋時避免對每個候選重跑閉運算）。
     """
-    fg = _fg_mask_merged(arr, bg, threshold)
+    fg = fg_merged if fg_merged is not None else _fg_mask_merged(arr, bg, threshold)
     if med is None:
         med = _interior_median_motif_area(fg)
     cents = _fg_centroids(
@@ -179,7 +250,7 @@ def _motif_centroids_for_gap(
     if len(cents) < 6:
         cents = _fg_centroids(fg, min_area=max(40, int(med * 0.08) if med else 40))
     if len(cents) < 6:
-        return cents, med if med else 0.0
+        return cents, med if med else 0.0, fg
     groups = _dual_scale_groups(cents)
     if groups is not None:
         large, _small = groups
@@ -195,9 +266,10 @@ def _motif_centroids_for_gap(
             [(cy, cx, 1000) for cy, cx in large], merge_dist
         )
         # 回傳整體 med 給切開檢查；勿用大花面積（否則切開門檻失真）
-        return merged, float(med)
+        return merged, float(med), fg
     merge_dist = max(24.0, float(np.sqrt(max(med, 1.0))) * 0.45)
-    return _merge_nearby_centroids(cents, merge_dist), float(med)
+    return _merge_nearby_centroids(cents, merge_dist), float(med), fg
+
 
 
 def _erode_bool(mask: np.ndarray, iterations: int = 2) -> np.ndarray:
@@ -427,14 +499,18 @@ def looks_like_regular_lattice(
     threshold: float = 40.0,
     *,
     max_cv: float = 0.55,
+    fg_merged: np.ndarray | None = None,
 ) -> bool:
     """
     質心是否近似規則晶格。不規則散點（已手繪四方連續的動物等）應為 False，
     避免硬走晶格裁切後 FAIL。
     雙尺度（大花環＋小碎花）只看大花；交錯格改用最近鄰 CV（軸投影 CV 會虛高）。
     """
+    # 超大圖用縮圖判斷規則性（質心幾何與縮放無關）
+    if fg_merged is None and max(arr.shape[0], arr.shape[1]) > _DISCRETE_FULLRES_TRIGGER:
+        arr, _ = _downscale_for_discrete_analysis(arr)
     # 花圈等碎裂圖案先閉運算再估質心，否則全是小碎花、雙尺度偵測不到
-    fg = _fg_mask_merged(arr, bg, threshold)
+    fg = fg_merged if fg_merged is not None else _fg_mask_merged(arr, bg, threshold)
     med = _interior_median_motif_area(fg)
     if med < 40:
         return False
@@ -684,7 +760,7 @@ def _wrap_gap_ratios(
     cents: list[tuple[float, float, int]] | None = None,
 ) -> tuple[float, float]:
     if cents is None:
-        cents, med_g = _motif_centroids_for_gap(arr, bg, threshold, med)
+        cents, med_g, _fg_m = _motif_centroids_for_gap(arr, bg, threshold, med)
         if med is None:
             med = med_g
     if med is None or med < 40:
@@ -774,15 +850,21 @@ def _cross_seam_cut_count(
     threshold: float,
     med: float | None = None,
     area_ratio_max: float = 0.55,
+    *,
+    adjust_large_med: bool = True,
+    fg: np.ndarray | None = None,
 ) -> int:
     """
     腐蝕後中縫殘片數（只計明顯小於完整圖案的碎片）。
     不做質量平衡／色差硬判——那些會把正確跨縫對接誤判成切開。
+    adjust_large_med=False：med 已是切開用面積（含大圖章中位），跳過昂貴重估。
     """
-    fg = _fg_mask(arr, bg, threshold)
+    if fg is None:
+        fg = _fg_mask(arr, bg, threshold)
     if med is None:
         med = _interior_median_motif_area(fg)
-    med = _large_motif_median(arr, bg, threshold, med)
+    if adjust_large_med:
+        med = _large_motif_median(arr, bg, threshold, med)
     if med < 40:
         return 0
     body = _erode_bool(fg, 2)
@@ -1038,6 +1120,37 @@ def _color_wrap_penalty(
     return pen
 
 
+def _rank_tile_light(
+    tile: np.ndarray,
+    bg: Sequence[int],
+    threshold: float,
+    med: float,
+    px: int = 0,
+    py: int = 0,
+    *,
+    cut_med: float | None = None,
+) -> tuple[int, float]:
+    """搜尋用輕量評分：切開數 + 邊緣前景 + 週期一致性（不做閉運算合併）。"""
+    fg = _fg_mask(tile, bg, threshold)
+    med_cut = cut_med if cut_med is not None else med
+    cuts = _cross_seam_cut_count(
+        tile,
+        bg,
+        threshold,
+        med=med_cut,
+        adjust_large_med=cut_med is None,
+        fg=fg,
+    )
+    score = cuts * 100.0
+    score += _edge_fg_score(fg, max(2, min(6, min(tile.shape[0], tile.shape[1]) // 80))) * 8.0
+    score += _edge_profile_mismatch(fg)
+    score += _join_continuity_penalty(tile)
+    if px > 0 and py > 0:
+        score += _period_consistency_error(tile, px, py) * 2.0
+    tier = 0 if cuts == 0 else 2
+    return tier, score
+
+
 def _rank_tile(
     tile: np.ndarray,
     bg: Sequence[int],
@@ -1045,9 +1158,24 @@ def _rank_tile(
     med: float,
     px: int = 0,
     py: int = 0,
-) -> tuple[int, float]:
-    cuts = _cross_seam_cut_count(tile, bg, threshold, med=med)
-    gap_cents, gap_med = _motif_centroids_for_gap(tile, bg, threshold, med)
+    *,
+    cut_med: float | None = None,
+    fg_merged: np.ndarray | None = None,
+) -> tuple[int, float, float, float]:
+    """回傳 (tier, score, gap_x, gap_y)。搜尋端可直接用 gap，避免再算一次 wrap_gap。"""
+    fg = _fg_mask(tile, bg, threshold)
+    med_cut = cut_med if cut_med is not None else med
+    cuts = _cross_seam_cut_count(
+        tile,
+        bg,
+        threshold,
+        med=med_cut,
+        adjust_large_med=cut_med is None,
+        fg=fg,
+    )
+    gap_cents, gap_med, fg_merged = _motif_centroids_for_gap(
+        tile, bg, threshold, med, fg_merged=fg_merged
+    )
     gx, gy = _wrap_gap_ratios(
         tile, bg, threshold, med=gap_med if gap_med >= 40 else med, cents=gap_cents
     )
@@ -1068,16 +1196,16 @@ def _rank_tile(
         cons = _period_consistency_error(tile, px, py)
         score += cons * 2.0
     # 輕量邊緣前景：縫落空隙略優於切開，但不壓過完整性
-    fg = _fg_mask(tile, bg, threshold)
     score += _edge_fg_score(fg, max(2, min(6, min(tile.shape[0], tile.shape[1]) // 80))) * 8.0
     score += _edge_profile_mismatch(fg)
     score += _join_continuity_penalty(tile)
     groups = _dual_scale_groups(gap_cents) if gap_cents else None
-    # gap_cents 若已是大花-only，再 dual 會失敗；改用合併 mask 全質心
+    # gap_cents 若已是大花-only，再 dual 會失敗；改用合併 mask 全質心（重用已算 mask）
     if groups is None:
-        fg_m = _fg_mask_merged(tile, bg, threshold)
-        med_m = _interior_median_motif_area(fg_m)
-        cents_m = _fg_centroids(fg_m, min_area=max(40, int(med_m * 0.08) if med_m else 40))
+        med_m = _interior_median_motif_area(fg_merged)
+        cents_m = _fg_centroids(
+            fg_merged, min_area=max(40, int(med_m * 0.08) if med_m else 40)
+        )
         groups = _dual_scale_groups(cents_m)
     if groups is not None:
         # 双尺度：優先縫落空隙，避免大切過大花造成 1px 錯位感
@@ -1088,7 +1216,7 @@ def _rank_tile(
         score += miss * 30.0
         if hard and miss > 0:
             tier = 1
-    return tier, score
+    return tier, score, gx, gy
 
 
 def _edge_fg_score(fg: np.ndarray, band: int) -> float:
@@ -1168,33 +1296,56 @@ def try_discrete_lattice_crop(
     arr: np.ndarray,
     bg: Sequence[int],
     threshold: float = 40.0,
-) -> tuple[np.ndarray | None, str, int]:
+    *,
+    fg_merged: np.ndarray | None = None,
+    med: float | None = None,
+    cut_med: float | None = None,
+    log: Callable[[str], None] | None = None,
+) -> tuple[np.ndarray | None, str, int, tuple[int, int, int, int, int, int] | None]:
+    """
+    回傳 (tile, detail, tier, box)。
+    box = (dx, dy, cw, ch, px, py)，失敗時為 None。
+    """
+    def _lg(msg: str) -> None:
+        if log is not None:
+            log(msg)
+
     h, w = arr.shape[:2]
     fg_raw = _fg_mask(arr, bg, threshold)
     if float(fg_raw.mean()) < 0.02:
-        return None, "前景過少", 2
+        return None, "前景過少", 2, None
 
     # 週期／質心用合併後 mask；切開檢查仍看原始色差前景
-    fg = _fg_mask_merged(arr, bg, threshold)
-    med = _interior_median_motif_area(fg)
+    fg = fg_merged if fg_merged is not None else _fg_mask_merged(arr, bg, threshold)
+    if med is None:
+        med = _interior_median_motif_area(fg)
     if med < 40:
-        return None, "無法估圖案尺寸", 2
+        return None, "無法估圖案尺寸", 2, None
+    # 切開門檻只估一次（源圖），搜尋候選不再重跑大圖章質心
+    if cut_med is None:
+        cut_med = _large_motif_median(arr, bg, threshold, med)
 
     cents_all = _fg_centroids(fg, min_area=max(40, int(med * 0.08)), skip_edge=True)
     if len(cents_all) < 6:
         cents_all = _fg_centroids(fg, min_area=max(40, int(med * 0.08)))
     if len(cents_all) < 6:
-        return None, "質心過少", 2
+        return None, "質心過少", 2, None
 
     groups = _dual_scale_groups(cents_all)
     if groups is not None:
         large, _small = groups
-        meds = _area_cluster_medians([a for _, _, a in cents_all])
-        split = float(np.sqrt(meds[0] * meds[-1]))
-        large_areas = [a for _, _, a in cents_all if a >= split]
-        med_pitch = float(np.median(large_areas)) if large_areas else med
-        cents_pitch = [(cy, cx, 1000) for cy, cx in large]
-    else:
+        # 大花過少（柯基+碎星心）：勿只拿 8 點估週期，否則易 2× 半幅假週期
+        if len(large) < 12:
+            groups = None
+            cents_pitch = cents_all
+            med_pitch = med
+        else:
+            meds = _area_cluster_medians([a for _, _, a in cents_all])
+            split = float(np.sqrt(meds[0] * meds[-1]))
+            large_areas = [a for _, _, a in cents_all if a >= split]
+            med_pitch = float(np.median(large_areas)) if large_areas else med
+            cents_pitch = [(cy, cx, 1000) for cy, cx in large]
+    if groups is None:
         cents_pitch = cents_all
         med_pitch = med
 
@@ -1210,7 +1361,7 @@ def try_discrete_lattice_crop(
             cents_pitch, max(merge_dist, min(nn0 * 0.4, 90.0))
         )
     if len(cents_pitch) < 4:
-        return None, "質心過少", 2
+        return None, "質心過少", 2, None
 
     ox0, oy0, pitch_x, pitch_y = _centroid_seam_offsets(cents_pitch, h, w, med_pitch)
     # 交錯／磚縫：軸投影半週期 → 用最近鄰距離校正
@@ -1264,7 +1415,7 @@ def try_discrete_lattice_crop(
         sizes_x2 = _float_period_sizes(w, pitch_x * 2.0)
         sizes_y2 = _float_period_sizes(h, pitch_y * 2.0)
     if not sizes_x or not sizes_y:
-        return None, "無週期候選", 2
+        return None, "無週期候選", 2, None
 
     # 質心空隙作種子偏移（用浮點 pitch 取模，避免 round 後差 3～5px 切到圖案）
     ipx = max(1, int(round(pitch_x if not (c2x or c2y) else pitch_x)))
@@ -1274,28 +1425,6 @@ def try_discrete_lattice_crop(
     band = max(2, int(round(np.sqrt(max(med, 1.0))) * 0.12))
     min_side = max(int(min(h, w) * 0.50), 240)
     fg = _fg_mask(arr, bg, threshold)
-
-    def _sym_score(fgt: np.ndarray) -> float:
-        b = max(1, min(band, fgt.shape[0] // 8, fgt.shape[1] // 8))
-        left = float(fgt[:, :b].mean())
-        right = float(fgt[:, fgt.shape[1] - b :].mean())
-        top = float(fgt[:b, :].mean())
-        bot = float(fgt[fgt.shape[0] - b :, :].mean())
-        return left + right + top + bot + abs(left - right) * 3.0 + abs(top - bot) * 3.0
-
-    def _gap_clearance(dx: int, dy: int, cw: int, ch: int) -> float:
-        """裁切邊到最近質心的最小距離（越大越表示縫在空隙）。"""
-        if not cents_pitch:
-            return 0.0
-        best = 1e9
-        for cy, cx, _ in cents_pitch:
-            if not (dx - 2 <= cx < dx + cw + 2 and dy - 2 <= cy < dy + ch + 2):
-                continue
-            # 相對裁切框的環距（含對邊）
-            rx = min(abs(cx - dx), abs(cx - (dx + cw)))
-            ry = min(abs(cy - dy), abs(cy - (dy + ch)))
-            best = min(best, rx, ry)
-        return 0.0 if best > 1e8 else float(best)
 
     # 交錯時 2× 尺寸優先，避免 1× 半週期「假硬通過」
     size_pairs: list[tuple[int, int, int, int]] = []
@@ -1327,19 +1456,78 @@ def try_discrete_lattice_crop(
         if (pr[0], pr[1]) not in seen_sz:
             seen_sz.add((pr[0], pr[1]))
             uniq_pairs.append(pr)
-    size_pairs = uniq_pairs[:8]
+    size_pairs = uniq_pairs[:6]
     if not size_pairs:
-        return None, "無可用裁切尺寸", 2
+        return None, "無可用裁切尺寸", 2, None
+
+    _lg(f"  → 點綴晶格：搜尋 {len(size_pairs)} 組裁切尺寸…")
+    # 積分圖加速邊緣對稱分；質心陣列加速空隙距離
+    fg_integ = cv2.integral(fg.astype(np.float32))
+    cents_xy = (
+        np.array([(cx, cy) for cy, cx, _ in cents_pitch], dtype=np.float64)
+        if cents_pitch
+        else np.zeros((0, 2), dtype=np.float64)
+    )
+
+    def _rect_mean(y0: int, x0: int, y1: int, x1: int) -> float:
+        area = max(1, (y1 - y0) * (x1 - x0))
+        s = (
+            float(fg_integ[y1, x1])
+            - float(fg_integ[y0, x1])
+            - float(fg_integ[y1, x0])
+            + float(fg_integ[y0, x0])
+        )
+        return s / area
+
+    def _sym_score_at(dx: int, dy: int, cw: int, ch: int) -> float:
+        b = max(1, min(band, ch // 8, cw // 8))
+        left = _rect_mean(dy, dx, dy + ch, dx + b)
+        right = _rect_mean(dy, dx + cw - b, dy + ch, dx + cw)
+        top = _rect_mean(dy, dx, dy + b, dx + cw)
+        bot = _rect_mean(dy + ch - b, dx, dy + ch, dx + cw)
+        return (
+            left
+            + right
+            + top
+            + bot
+            + abs(left - right) * 3.0
+            + abs(top - bot) * 3.0
+        )
+
+    def _gap_clearance_fast(dx: int, dy: int, cw: int, ch: int) -> float:
+        if cents_xy.shape[0] == 0:
+            return 0.0
+        cx = cents_xy[:, 0]
+        cy = cents_xy[:, 1]
+        inside = (
+            (cx >= dx - 2)
+            & (cx < dx + cw + 2)
+            & (cy >= dy - 2)
+            & (cy < dy + ch + 2)
+        )
+        if not np.any(inside):
+            return 0.0
+        cx = cx[inside]
+        cy = cy[inside]
+        rx = np.minimum(np.abs(cx - dx), np.abs(cx - (dx + cw)))
+        ry = np.minimum(np.abs(cy - dy), np.abs(cy - (dy + ch)))
+        return float(np.min(np.minimum(rx, ry)))
 
     coarse: list[tuple[tuple[int, float], int, int, int, int, np.ndarray, str]] = []
     min_px_i = max(48, int(round(min_pitch)))
-    for cw, ch, px, py in size_pairs:
+    for si, (cw, ch, px, py) in enumerate(size_pairs):
+        _lg(
+            f"  → 點綴晶格：尺寸組 {si + 1}/{len(size_pairs)} "
+            f"週期 {px}×{py} → 單元 {cw}×{ch}"
+        )
         # 雙重保險：非整數倍週期直接跳過；過短週期禁止硬通過候選
         if cw % px != 0 or ch % py != 0:
             continue
         if px < min_px_i or py < min_px_i:
             continue
-        step = 2 if max(px, py) >= 90 else 1
+        step = 2 if max(px, py) >= 70 else 1
+        if max(px, py) >= 140:
+            step = max(step, 3)
         seeds = [
             (0, 0),
             (seed_ox % px, seed_oy % py),
@@ -1350,7 +1538,7 @@ def try_discrete_lattice_crop(
         ]
         # 大花質心空隙中點（正交格用 1/2 週期；磚縫／交錯用 1/4）
         gap_frac = 0.25 if stagger else 0.5
-        for cy, cx, _ in cents_pitch[:24]:
+        for cy, cx, _ in cents_pitch[:10]:
             seeds.append(
                 (
                     int(round(cx - px * gap_frac)) % px,
@@ -1367,53 +1555,77 @@ def try_discrete_lattice_crop(
         scored: list[tuple[float, int, int]] = []
         seen_xy: set[tuple[int, int]] = set()
 
-        def _add(dx: int, dy: int) -> None:
+        def _add_coarse(dx: int, dy: int) -> None:
             if dx < 0 or dy < 0 or dx + cw > w or dy + ch > h:
                 return
             key = (dx, dy)
             if key in seen_xy:
                 return
             seen_xy.add(key)
-            e = _sym_score(fg[dy : dy + ch, dx : dx + cw])
-            # 縫離質心越遠越好（避免切心形）
-            e -= _gap_clearance(dx, dy, cw, ch) * 0.2
-            scored.append((e, dx, dy))
+            scored.append((_sym_score_at(dx, dy, cw, ch), dx, dy))
 
-        rad = max(8, min(px, py) // 3)
+        rad = max(6, min(px, py) // 5)
         for sx, sy in seeds:
             for dx in range(max(0, sx - rad), min(px, sx + rad + 1), step):
                 for dy in range(max(0, sy - rad), min(py, sy + rad + 1), step):
-                    _add(dx, dy)
-        # 種子鄰域 1px 精修（浮點取模後常需 ±1～2）
-        for dx in range(max(0, seed_ox - 3), min(px, seed_ox + 4)):
-            for dy in range(max(0, seed_oy - 3), min(py, seed_oy + 4)):
-                _add(dx, dy)
-        gx_step = max(step, max(1, px // 5))
-        gy_step = max(step, max(1, py // 5))
+                    _add_coarse(dx, dy)
+        # 種子鄰域精修（浮點取模後常需 ±1～2）
+        for dx in range(max(0, seed_ox - 2), min(px, seed_ox + 3)):
+            for dy in range(max(0, seed_oy - 2), min(py, seed_oy + 3)):
+                _add_coarse(dx, dy)
+        gx_step = max(step, max(2, px // 4))
+        gy_step = max(step, max(2, py // 4))
         for dx in range(0, px, gx_step):
             for dy in range(0, py, gy_step):
-                _add(dx, dy)
+                _add_coarse(dx, dy)
         # 相位也可超過單週期（裁切原點）
         for dx in range(0, max(1, w - cw + 1), max(step, px // 2 or 1)):
             for dy in range(0, max(1, h - ch + 1), max(step, py // 2 or 1)):
-                _add(dx, dy)
+                _add_coarse(dx, dy)
 
+        # 粗分 Top-N 再加空隙距離重排
         scored.sort(key=lambda t: t[0])
+        rescored: list[tuple[float, int, int]] = []
+        for e0, dx, dy in scored[:32]:
+            e = e0 - _gap_clearance_fast(dx, dy, cw, ch) * 0.2
+            rescored.append((e, dx, dy))
+        rescored.sort(key=lambda t: t[0])
+        scored = rescored
+
         local: tuple[tuple[int, float], int, int, np.ndarray] | None = None
         seen: set[tuple[int, int]] = set()
-        for _, dx, dy in scored[:16]:
+        # 搜尋用輕量評分；完整 _rank_tile 只用於局部優勝者
+        light_hits: list[tuple[tuple[int, float], int, int, np.ndarray]] = []
+        for _, dx, dy in scored[:6]:
             if (dx, dy) in seen:
                 continue
             seen.add((dx, dy))
             tile = arr[dy : dy + ch, dx : dx + cw]
-            key = _rank_tile(tile, bg, threshold, med, px=px, py=py)
-            clr = _gap_clearance(dx, dy, cw, ch)
-            gx, gy = _wrap_gap_ratios(tile, bg, threshold, med=med)
+            key = _rank_tile_light(
+                tile, bg, threshold, med, px=px, py=py, cut_med=cut_med
+            )
+            clr = _gap_clearance_fast(dx, dy, cw, ch)
+            key2 = (key[0], key[1] - clr * 3.0)
+            light_hits.append((key2, dx, dy, tile))
+        light_hits.sort(key=lambda t: t[0])
+        for key2, dx, dy, tile in light_hits[:3]:
+            fg_t = fg[dy : dy + ch, dx : dx + cw]
+            tier, sc, gx, gy = _rank_tile(
+                tile,
+                bg,
+                threshold,
+                med,
+                px=px,
+                py=py,
+                cut_med=cut_med,
+                fg_merged=fg_t,
+            )
+            key = (tier, sc)
+            clr = _gap_clearance_fast(dx, dy, cw, ch)
             gap_pen = (abs(gx - 1.0) + abs(gy - 1.0)) * 80.0
-            # 同 tier 時偏好縫在空隙、跨縫間距接近 1（避免「色差好看、花距空一倍」）
-            key2 = (key[0], key[1] + gap_pen - clr * 3.0)
-            if local is None or key2 < local[0]:
-                local = (key2, dx, dy, tile.copy())
+            key_full = (key[0], key[1] + gap_pen - clr * 3.0)
+            if local is None or key_full < local[0]:
+                local = (key_full, dx, dy, tile.copy())
             if (
                 key[0] == 0
                 and key[1] < 12.0
@@ -1426,12 +1638,22 @@ def try_discrete_lattice_crop(
             continue
         key0, best_dx, best_dy, tile0 = local
         if key0[0] != 0 or key0[1] > 8.0:
-            for dx in range(max(0, best_dx - 2), min(w - cw + 1, best_dx + 3)):
-                for dy in range(max(0, best_dy - 2), min(h - ch + 1, best_dy + 3)):
+            for dx in range(max(0, best_dx - 1), min(w - cw + 1, best_dx + 2)):
+                for dy in range(max(0, best_dy - 1), min(h - ch + 1, best_dy + 2)):
                     tile = arr[dy : dy + ch, dx : dx + cw]
-                    key = _rank_tile(tile, bg, threshold, med, px=px, py=py)
-                    clr = _gap_clearance(dx, dy, cw, ch)
-                    gx, gy = _wrap_gap_ratios(tile, bg, threshold, med=med)
+                    fg_t = fg[dy : dy + ch, dx : dx + cw]
+                    tier, sc, gx, gy = _rank_tile(
+                        tile,
+                        bg,
+                        threshold,
+                        med,
+                        px=px,
+                        py=py,
+                        cut_med=cut_med,
+                        fg_merged=fg_t,
+                    )
+                    key = (tier, sc)
+                    clr = _gap_clearance_fast(dx, dy, cw, ch)
                     gap_pen = (abs(gx - 1.0) + abs(gy - 1.0)) * 80.0
                     key2 = (key[0], key[1] + gap_pen - clr * 3.0)
                     if key2 < key0:
@@ -1442,52 +1664,71 @@ def try_discrete_lattice_crop(
                     break
         detail = f"晶格週期 {px}×{py}px → 單元 {cw}×{ch}"
         coarse.append((key0, best_dx, best_dy, px, py, tile0, detail))
+        # 已有很好的硬通過：不必再掃其餘尺寸
+        if key0[0] == 0 and key0[1] < 6.0:
+            break
         if key0[0] == 0 and key0[1] < 8.0:
             # 繼續試其他尺寸，取更好硬通過
             continue
 
     if not coarse:
-        return None, "無可用裁切", 2
+        return None, "無可用裁切", 2, None
 
     # 補試：2×／3× 週期 × 質心空隙相位（正交 1/2；磚縫 1/4）
-    gap_frac = 0.25 if stagger else 0.5
-    for px, py in {(pr[2], pr[3]) for pr in size_pairs}:
-        for nx, ny in ((2, 2), (2, 3), (3, 2)):
-            cw, ch = nx * px, ny * py
-            if cw > w or ch > h or cw < min_side or ch < min_side:
-                continue
-            for cy, cx, _ in cents_pitch[:10]:
-                fracs = (gap_frac, 0.75) if stagger else (gap_frac,)
-                for frac in fracs:
-                    ox = int(round(cx - px * frac))
-                    oy = int(round(cy - py * frac))
-                    for dx, dy in (
-                        (ox, oy),
-                        (ox - 2, oy),
-                        (ox + 2, oy),
-                        (ox, oy - 2),
-                        (ox, oy + 2),
-                        (ox - 4, oy - 2),
-                        (ox + 4, oy + 2),
-                    ):
-                        if dx < 0 or dy < 0 or dx + cw > w or dy + ch > h:
+    # 已有硬通過時略過，大幅縮短搜尋
+    has_hard = any(t[0][0] == 0 and t[0][1] < 20.0 for t in coarse)
+    if not has_hard:
+        gap_frac = 0.25 if stagger else 0.5
+        for px, py in {(pr[2], pr[3]) for pr in size_pairs}:
+            for nx, ny in ((2, 2), (2, 3), (3, 2)):
+                cw, ch = nx * px, ny * py
+                if cw > w or ch > h or cw < min_side or ch < min_side:
+                    continue
+                for cy, cx, _ in cents_pitch[:4]:
+                    fracs = (gap_frac, 0.75) if stagger else (gap_frac,)
+                    for frac in fracs:
+                        ox = int(round(cx - px * frac))
+                        oy = int(round(cy - py * frac))
+                        for dx, dy in (
+                            (ox, oy),
+                            (ox - 2, oy),
+                            (ox + 2, oy),
+                            (ox, oy - 2),
+                            (ox, oy + 2),
+                        ):
+                            if dx < 0 or dy < 0 or dx + cw > w or dy + ch > h:
+                                continue
+                            tile = arr[dy : dy + ch, dx : dx + cw]
+                            # 先輕量過濾
+                            if _rank_tile_light(
+                                tile, bg, threshold, med, px=px, py=py, cut_med=cut_med
+                            )[0] > 0:
+                                continue
+                            fg_t = fg[dy : dy + ch, dx : dx + cw]
+                            tier, sc, gx, gy = _rank_tile(
+                                tile,
+                                bg,
+                                threshold,
+                                med,
+                                px=px,
+                                py=py,
+                                cut_med=cut_med,
+                                fg_merged=fg_t,
+                            )
+                            key = (tier, sc)
+                            gap_pen = (abs(gx - 1.0) + abs(gy - 1.0)) * 80.0
+                            clr = _gap_clearance_fast(dx, dy, cw, ch)
+                            key2 = (key[0], key[1] + gap_pen - clr * 3.0)
+                            detail = f"晶格週期 {px}×{py}px → 單元 {cw}×{ch}"
+                            coarse.append((key2, dx, dy, px, py, tile.copy(), detail))
+                            if key[0] == 0 and gap_pen < 8.0 and key[1] < 40.0:
+                                break
+                        else:
                             continue
-                        tile = arr[dy : dy + ch, dx : dx + cw]
-                        key = _rank_tile(tile, bg, threshold, med, px=px, py=py)
-                        gx, gy = _wrap_gap_ratios(tile, bg, threshold, med=med)
-                        gap_pen = (abs(gx - 1.0) + abs(gy - 1.0)) * 80.0
-                        clr = _gap_clearance(dx, dy, cw, ch)
-                        key2 = (key[0], key[1] + gap_pen - clr * 3.0)
-                        detail = f"晶格週期 {px}×{py}px → 單元 {cw}×{ch}"
-                        coarse.append((key2, dx, dy, px, py, tile.copy(), detail))
-                        if key[0] == 0 and gap_pen < 8.0 and key[1] < 40.0:
-                            break
+                        break
                     else:
                         continue
                     break
-                else:
-                    continue
-                break
 
     # 同 tier：偏好間距分低、週期重複次數少（磚縫單元常是 2×2 格，勿被 3×3 大圖蓋過）
     def _sel_key(t: tuple) -> tuple:
@@ -1499,106 +1740,258 @@ def try_discrete_lattice_crop(
 
     coarse.sort(key=_sel_key)
     # 最終複核：嚴格間距；切開檢查用整體 med（勿用大花面積把切開漏掉）
-    for key, _dx, _dy, px, py, tile, detail in coarse:
-        rk = _rank_tile(tile, bg, threshold, med, px=px, py=py)
-        gx, gy = _wrap_gap_ratios(tile, bg, threshold, med=med)
+    for key, dx, dy, px, py, tile, detail in coarse[:6]:
+        th, tw = tile.shape[:2]
+        rk_t, rk_s, gx, gy = _rank_tile(
+            tile,
+            bg,
+            threshold,
+            med,
+            px=px,
+            py=py,
+            cut_med=cut_med,
+            fg_merged=fg[dy : dy + th, dx : dx + tw],
+        )
+        rk = (rk_t, rk_s)
         gap_ok = 0.90 <= gx <= 1.15 and 0.90 <= gy <= 1.15
         if rk[0] <= 1 and gap_ok:
-            return tile, detail, rk[0]
-    best_key, _, _, _, _, best_tile, best_detail = coarse[0]
-    return best_tile, best_detail, best_key[0]
+            return tile, detail, rk[0], (dx, dy, tw, th, px, py)
+    best_key, bdx, bdy, bpx, bpy, best_tile, best_detail = coarse[0]
+    bth, btw = best_tile.shape[:2]
+    return best_tile, best_detail, best_key[0], (bdx, bdy, btw, bth, bpx, bpy)
 
 
 def try_make_discrete_seamless(
     arr: np.ndarray,
     bg: Sequence[int],
     threshold: float = 40.0,
+    log: Callable[[str], None] | None = None,
 ) -> tuple[np.ndarray, str]:
-    """構造裁切為主；禁止邊緣相關備選勝出。"""
-    med = _interior_median_motif_area(_fg_mask_merged(arr, bg, threshold))
-    cropped, detail, tier = try_discrete_lattice_crop(arr, bg, threshold)
+    """構造裁切為主；禁止邊緣相關備選勝出。
+
+    超大圖會在縮圖上搜尋晶格，再映射回原圖裁切並用原圖接縫評分（不放寬標準）。
+    """
+    def _lg(msg: str) -> None:
+        if log is not None:
+            log(msg)
+
+    full_h, full_w = arr.shape[:2]
+    work = arr
+    scale = 1.0
+    if max(full_h, full_w) > _DISCRETE_FULLRES_TRIGGER:
+        work, scale = _downscale_for_discrete_analysis(arr)
+        wh, ww = work.shape[:2]
+        _lg(
+            f"  → 點綴晶格：原圖 {full_w}×{full_h} 過大，"
+            f"先以 {ww}×{wh} 搜尋再映射回原圖（接縫仍按原圖評）"
+        )
+
+    t_fg = time.perf_counter()
+    _lg("  → 點綴晶格：前景／質心分析…")
+    fg_src = _fg_mask_merged(work, bg, threshold)
+    med = _interior_median_motif_area(fg_src)
+    cut_med = _large_motif_median(work, bg, threshold, med) if med >= 40 else med
+    _lg(f"  → 點綴晶格：前景完成（{time.perf_counter() - t_fg:.1f}s）")
+
+    med_rank = med * scale * scale
+    cut_rank = (
+        (cut_med * scale * scale) if (cut_med is not None and med >= 40) else None
+    )
+
+    def _rk(
+        tile: np.ndarray,
+        px: int = 0,
+        py: int = 0,
+        fg_merged: np.ndarray | None = None,
+        *,
+        med_use: float | None = None,
+        cut_use: float | None = None,
+    ) -> tuple[int, float]:
+        m = med if med_use is None else med_use
+        c = (cut_med if med >= 40 else None) if cut_use is None else cut_use
+        t, s, _, _ = _rank_tile(
+            tile,
+            bg,
+            threshold,
+            m,
+            px=px,
+            py=py,
+            cut_med=c,
+            fg_merged=fg_merged,
+        )
+        return t, s
+
+    # 源圖接縫已極低：直接保留，跳過昂貴晶格搜尋。
+    # JPEG 爪印等邊緣碎點常被誤判切開；色差接縫夠低時以接縫為準。
+    sv0, sh0 = _tile_seam_scores(work)
+    if (sv0 + sh0) <= 3.5 and max(sv0, sh0) <= 2.5:
+        cuts0 = _cross_seam_cut_count(
+            work, bg, threshold, med=cut_med, adjust_large_med=False
+        )
+        if cuts0 == 0 or (sv0 + sh0) <= 3.0:
+            return arr.copy(), "原圖（接縫已低）"
+
+    box: tuple[int, int, int, int, int, int] | None = None
+    # 非規則散點：跳過昂貴晶格相位搜尋（仍可走質心滾動／原圖）
+    if looks_like_regular_lattice(work, bg, threshold, fg_merged=fg_src):
+        cropped, detail, _tier, box = try_discrete_lattice_crop(
+            work,
+            bg,
+            threshold,
+            fg_merged=fg_src,
+            med=med,
+            cut_med=cut_med if med >= 40 else None,
+            log=log,
+        )
+    else:
+        cropped, detail = None, "非規則晶格"
+        _lg("  → 點綴晶格：判定非規則，跳過晶格裁切搜尋")
 
     candidates: list[tuple[tuple[int, float], np.ndarray, str]] = []
-    if cropped is not None:
-        # 從 detail 解析週期（若有）
-        px_r = py_r = 0
-        if "晶格週期" in detail and "×" in detail:
-            try:
-                part = detail.split("晶格週期", 1)[1].split("px", 1)[0].strip()
-                a, b = part.split("×")
-                px_r, py_r = int(a), int(b)
-            except Exception:
-                px_r = py_r = 0
-        key = _rank_tile(cropped, bg, threshold, med, px=px_r, py=py_r)
-        # 過短週期不得硬通過
-        if px_r and py_r and (px_r < 64 or py_r < 64):
+    if cropped is not None and box is not None:
+        dx_s, dy_s, cw_s, ch_s, px_s, py_s = box
+        if scale != 1.0:
+            dx, dy, cw, ch, px_r, py_r = _map_lattice_box_to_full(
+                dx_s, dy_s, cw_s, ch_s, px_s, py_s, scale, full_h, full_w
+            )
+            # 大裁切禁止對每個偏移做完整 _rank_tile（會卡死）；
+            # 先用接縫色差輕量選相位，再對優勝者做一次完整評分。
+            rad = 1 if max(cw, ch) >= 4000 else max(1, min(3, int(round(scale))))
+            _lg(
+                f"  → 點綴晶格：映射原圖裁切 {cw}×{ch} @ ({dx},{dy})，"
+                f"週期 {px_r}×{py_r}，接縫精修 ±{rad}px…"
+            )
+            best_seam: float | None = None
+            best_xy = (dx, dy)
+            for ddx in range(-rad, rad + 1):
+                for ddy in range(-rad, rad + 1):
+                    x = min(max(0, dx + ddx), max(0, full_w - cw))
+                    y = min(max(0, dy + ddy), max(0, full_h - ch))
+                    sv, shs = _tile_seam_scores(arr[y : y + ch, x : x + cw])
+                    seam = sv + shs
+                    if best_seam is None or seam < best_seam:
+                        best_seam = seam
+                        best_xy = (x, y)
+            x, y = best_xy
+            cropped = arr[y : y + ch, x : x + cw].copy()
+            _lg("  → 點綴晶格：原圖裁切評分…")
+            if max(cw, ch) >= 4000:
+                # 超大單元避免完整連通域評分卡死；輕量分 + 接縫色差
+                key = _rank_tile_light(
+                    cropped,
+                    bg,
+                    threshold,
+                    med_rank,
+                    px=px_r,
+                    py=py_r,
+                    cut_med=cut_rank,
+                )
+                sv, shs = _tile_seam_scores(cropped)
+                key = (key[0], key[1] + (sv + shs) * 0.25)
+            else:
+                key = _rk(
+                    cropped,
+                    px_r,
+                    py_r,
+                    med_use=med_rank,
+                    cut_use=cut_rank,
+                )
+            detail = (
+                f"晶格週期 {px_r}×{py_r}px → 單元 {cw}×{ch}（大圖縮放分析）"
+            )
+        else:
+            px_r, py_r = px_s, py_s
+            key = _rk(cropped, px_r, py_r)
+
+        if px_r and py_r and (px_r < 80 or py_r < 80):
             key = (max(key[0], 1) + 1, key[1] + 80.0)
-        # 相對大圖章最近鄰過短 → 半週期切動物
         if px_r and py_r:
-            fg_n = _fg_mask_merged(arr, bg, threshold)
             cents_n = _fg_centroids(
-                fg_n, min_area=max(40, int(med * 0.08) if med else 40), skip_edge=True
+                fg_src,
+                min_area=max(40, int(med * 0.08) if med else 40),
+                skip_edge=True,
             )
             groups_n = _dual_scale_groups(cents_n)
             pts_n = groups_n[0] if groups_n is not None else [
                 (cy, cx) for cy, cx, _ in cents_n
             ]
-            nn_n = _nn_median_spacing(pts_n)
+            nn_n = _nn_median_spacing(pts_n) * scale
             if nn_n >= 80 and (px_r < nn_n * 0.55 or py_r < nn_n * 0.55):
                 key = (max(key[0], 1) + 1, key[1] + 90.0)
         candidates.append((key, cropped, f"點綴晶格({detail})"))
         if key[0] == 0:
-            # 接縫明顯差於原圖時不提早返回（避免「切花但色差碰巧過門」）
-            cv, ch = _tile_seam_scores(cropped)
-            ov, oh = _tile_seam_scores(arr)
-            if (cv + ch) <= (ov + oh) * 1.02 + 1.0:
+            cv, chs = _tile_seam_scores(cropped)
+            ov, oh = _tile_seam_scores(arr if scale != 1.0 else work)
+            seam_ok = (cv + chs) <= (ov + oh) * 1.02 + 1.0
+            abs_ok = (cv + chs) <= 28.0 and max(cv, chs) <= 20.0
+            if seam_ok and abs_ok:
                 return cropped, f"點綴晶格({detail})"
 
     # 僅質心滾動備選。原圖已有碰邊殘片時禁止：滾動只會把半隻動物捲到畫面中央。
-    orig_cuts = _cross_seam_cut_count(arr, bg, threshold, med=med)
+    orig_cuts = _cross_seam_cut_count(
+        work, bg, threshold, med=cut_med, adjust_large_med=False
+    )
     if med >= 40 and orig_cuts == 0:
-        fg = _fg_mask_merged(arr, bg, threshold)
-        cents = _fg_centroids(fg, min_area=max(40, int(med * 0.08)), skip_edge=True)
+        cents = _fg_centroids(fg_src, min_area=max(40, int(med * 0.08)), skip_edge=True)
         if len(cents) < 4:
-            cents = _fg_centroids(fg, min_area=max(40, int(med * 0.08)))
+            cents = _fg_centroids(fg_src, min_area=max(40, int(med * 0.08)))
         groups_ph = _dual_scale_groups(cents)
         if groups_ph is not None:
             cents = [(cy, cx, 1000) for cy, cx in groups_ph[0]]
         if len(cents) >= 4:
-            ox, oy, px, py = _centroid_seam_offsets(
-                cents, arr.shape[0], arr.shape[1], med
+            _lg("  → 點綴晶格：質心相位搜尋…")
+            wh, ww = work.shape[:2]
+            ox, oy, px, py = _centroid_seam_offsets(cents, wh, ww, med)
+            best_r = np.roll(np.roll(work, -oy, 0), -ox, 1)
+            best_light = _rank_tile_light(
+                best_r, bg, threshold, med, cut_med=cut_med
             )
-            best_r = np.roll(np.roll(arr, -oy, 0), -ox, 1)
-            best_k = _rank_tile(best_r, bg, threshold, med)
-            rad = max(4, int(round(max(px, py, 16) * 0.15)))
+            best_ox, best_oy = ox, oy
+            rad = max(3, int(round(max(px, py, 16) * 0.10)))
             for dx in range(-rad, rad + 1, 2):
-                cand = np.roll(np.roll(arr, -oy, 0), -(ox + dx), 1)
-                k = _rank_tile(cand, bg, threshold, med)
-                if k < best_k:
-                    best_k, best_r = k, cand
-                    ox = (ox + dx) % arr.shape[1]
+                cand = np.roll(np.roll(work, -oy, 0), -(ox + dx), 1)
+                k = _rank_tile_light(cand, bg, threshold, med, cut_med=cut_med)
+                if k < best_light:
+                    best_light, best_ox = k, (ox + dx) % ww
+                    best_r = cand
             for dy in range(-rad, rad + 1, 2):
-                cand = np.roll(np.roll(arr, -(oy + dy), 0), -ox, 1)
-                k = _rank_tile(cand, bg, threshold, med)
-                if k < best_k:
-                    best_k, best_r = k, cand
-                    oy = (oy + dy) % arr.shape[0]
-            candidates.append((best_k, best_r, "點綴質心相位"))
+                cand = np.roll(np.roll(work, -(oy + dy), 0), -best_ox, 1)
+                k = _rank_tile_light(cand, bg, threshold, med, cut_med=cut_med)
+                if k < best_light:
+                    best_light = k
+                    best_oy = (oy + dy) % wh
+                    best_r = cand
+            if scale != 1.0:
+                ox_f = int(round(best_ox * scale)) % full_w
+                oy_f = int(round(best_oy * scale)) % full_h
+                best_full = np.roll(np.roll(arr, -oy_f, 0), -ox_f, 1)
+                best_k = _rk(
+                    best_full, med_use=med_rank, cut_use=cut_rank
+                )
+                candidates.append((best_k, best_full, "點綴質心相位"))
+            else:
+                best_k = _rk(best_r)
+                candidates.append((best_k, best_r, "點綴質心相位"))
 
-    candidates.append((_rank_tile(arr, bg, threshold, med), arr.copy(), "原圖"))
-    # 接縫相對原圖明顯變差的候選降級（避免硬通過／軟通過切花勝出）
-    ov, oh = _tile_seam_scores(arr)
+    # 原圖候選：大圖用縮圖打分，勝出仍回傳原解析度
+    if scale != 1.0:
+        candidates.append(
+            (_rk(work, fg_merged=fg_src), arr.copy(), "原圖")
+        )
+    else:
+        candidates.append((_rk(arr, fg_merged=fg_src), arr.copy(), "原圖"))
+
+    ov, oh = _tile_seam_scores(arr if scale != 1.0 else work)
     base_seam = ov + oh
     adjusted: list[tuple[tuple[int, float], np.ndarray, str]] = []
     for key, tile, msg in candidates:
-        cv, ch = _tile_seam_scores(tile)
-        seam = cv + ch
+        cv, chs = _tile_seam_scores(tile)
+        seam = cv + chs
         k0, k1 = key
         if seam > base_seam * 1.15 + 3.0:
             k0 = max(k0, 1) + 1
             k1 = k1 + (seam - base_seam) * 1.5
         elif seam > base_seam and ("晶格" in msg or "質心" in msg):
-            # 任何接縫變差的點綴候選都不得壓過原圖
             k0 = max(k0, 2)
             k1 = k1 + (seam - base_seam) * 3.0
         adjusted.append(((k0, k1), tile, msg))
@@ -1618,17 +2011,49 @@ def large_stamp_like(
     threshold: float = 40.0,
 ) -> bool:
     """獨立大圖章（動物／貼紙），相對滿鋪紋理。"""
-    fg = _fg_mask_merged(arr, bg, threshold)
+    # 超大圖先縮再判斷，面積門檻依縮放補償
+    h0, w0 = arr.shape[:2]
+    if max(h0, w0) > _DISCRETE_FULLRES_TRIGGER:
+        work, scale = _downscale_for_discrete_analysis(arr, max_side=1600)
+        area_s = scale * scale
+    else:
+        work, area_s = arr, 1.0
+    fg = _fg_mask_merged(work, bg, threshold)
+    # 密鋪／滿花：前景覆蓋高，禁止當大圖章（否則半幅偏移被擋死）
+    if float(np.mean(fg)) > 0.22:
+        return False
     med = _interior_median_motif_area(fg)
-    cents = _fg_centroids(
-        fg, min_area=max(40, int(med * 0.08) if med else 40), skip_edge=True
-    )
+    min_area = max(40, int(med * 0.08) if med else 40)
+    # 含碰邊塊：密花常被合併成少數超大邊塊，skip_edge 會誤成「稀疏大圖章」
+    cents_all = _fg_centroids(fg, min_area=min_area, skip_edge=False)
+    if len(cents_all) >= 12:
+        return False
+    areas_all = [a for *_, a in cents_all]
+    if areas_all:
+        mx_all = max(areas_all)
+        # 碰邊超大連通域＝滿鋪花網，不是單隻貼紙
+        if mx_all >= fg.size * 0.18 and len(cents_all) >= 5:
+            return False
+    cents = _fg_centroids(fg, min_area=min_area, skip_edge=True)
     if len(cents) < 4:
         return False
+    # 碎花／拼布格：很多中等塊，勿當大圖章（否則清邊會咬出白齒縫）
+    if len(cents) > 36:
+        return False
     areas = [a for *_, a in cents]
+    large_thr = 4000.0 / area_s
+    stamp_thr = 8000.0 / area_s
+    large_n = sum(1 for a in areas if a >= large_thr)
+    if large_n > 10:
+        return False
+    # 多個大塊重複陣列／滿鋪：非「單隻動物圖章」
+    if large_n >= 3 and len(cents) >= 8:
+        return False
+    if len(cents) >= 16:
+        return False
     mx = max(areas)
     med_a = float(np.median(areas))
-    return mx >= 8000 and mx >= med_a * 5.0
+    return mx >= stamp_thr and mx >= med_a * 5.0
 
 
 cross_seam_cut_count = _cross_seam_cut_count

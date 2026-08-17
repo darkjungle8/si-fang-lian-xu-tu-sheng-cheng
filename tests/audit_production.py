@@ -37,8 +37,16 @@ def _configure_stdio() -> None:
             pass
 
 
-def _collect_images(input_dir: Path, exclude_list: set[str]) -> list[Path]:
+def _collect_images(
+    input_dir: Path,
+    exclude_list: set[str],
+    *,
+    skip_dirs: set[str] | None = None,
+    dedup_name_size: bool = False,
+) -> list[Path]:
     files: list[Path] = []
+    seen_name_size: set[tuple[str, int]] = set()
+    skip = {s.lower() for s in (skip_dirs or set())}
     for p in sorted(input_dir.rglob("*")):
         if not p.is_file():
             continue
@@ -46,11 +54,22 @@ def _collect_images(input_dir: Path, exclude_list: set[str]) -> list[Path]:
             continue
         if EXCLUDE_DIR_NAME in p.parts:
             continue
+        try:
+            rel_parts = p.resolve().relative_to(input_dir.resolve()).parts
+        except ValueError:
+            rel_parts = p.parts
+        if any(part.lower() in skip for part in rel_parts[:-1]):
+            continue
         if p.name.lower() in {"thumbs.db", ".ds_store"}:
             continue
         rel = str(p.resolve())
         if rel in exclude_list or p.name in exclude_list:
             continue
+        if dedup_name_size:
+            key = (p.name.lower(), int(p.stat().st_size))
+            if key in seen_name_size:
+                continue
+            seen_name_size.add(key)
         files.append(p)
     return files
 
@@ -142,7 +161,12 @@ def _flag_reasons(row: dict) -> list[str]:
     if min(int(sw), int(sh)) < 64:
         reasons.append(f"tiny_src:{sw}x{sh}")
 
-    keep_orig = ("保留原圖" in mode) and ("邊緣對齊" not in mode) and ("去光照" not in mode)
+    keep_orig = (
+        ("保留原圖" in mode)
+        and ("邊緣對齊" not in mode)
+        and ("強制半幅" not in mode)
+        and ("去光照" not in mode)
+    )
     icon_no_eq = "圖示格免色差" in mode
     # 保留原圖：演算法已選最佳（原圖），不當「未改善」假陽性
     # 接縫仍明顯時標記，供隔離不合格源圖（對齊可視色差/十字縫）
@@ -157,19 +181,32 @@ def _flag_reasons(row: dict) -> list[str]:
             reasons.append(f"not_improved:{src_sum:.1f}->{unit_sum:.1f}")
     else:
         # 僅在接縫未實質下降時標記（已改善的不算）
-        if unit_sum > 12.0 and unit_sum >= src_sum * 0.95:
+        # 強制半幅／邊緣對齊半幅：外緣數學連續，高頻紋理可讓 RGB 分數上升，不算失敗
+        half_math = (
+            "強制半幅" in mode
+            or "半幅偏移" in mode
+            or "邊緣對齊" in mode
+        )
+        if (
+            not half_math
+            and unit_sum > 12.0
+            and unit_sum >= src_sum * 0.95
+        ):
             # 忽略 <2 的微小波動
             if unit_sum >= src_sum + 2.0 or unit_sum >= src_sum * 1.02:
                 reasons.append(f"not_improved:{src_sum:.1f}->{unit_sum:.1f}")
         # 週期裁切等「有處理」但仍殘留明顯色差十字縫
         # 邊緣對齊已大幅改善者放寬（半幅偏移後高頻紋理 RGB 殘差常在 25–65）
-        if "邊緣對齊" in mode:
+        if "邊緣對齊" in mode or "強制半幅" in mode:
             if unit_sum > 75 or max(float(unit_v), float(unit_h)) > 42:
                 reasons.append(f"still_high:{unit_v}+{unit_h}")
         elif unit_sum > 38 or max(float(unit_v), float(unit_h)) > 30:
             reasons.append(f"still_high:{unit_v}+{unit_h}")
-    if not icon_no_eq and "邊緣對齊" not in mode and (
-        unit_sum > 70 or max(float(unit_v), float(unit_h)) > 45
+    if (
+        not icon_no_eq
+        and "邊緣對齊" not in mode
+        and "強制半幅" not in mode
+        and (unit_sum > 70 or max(float(unit_v), float(unit_h)) > 45)
     ):
         if f"still_high:{unit_v}+{unit_h}" not in reasons:
             reasons.append(f"still_high:{unit_v}+{unit_h}")
@@ -181,14 +218,18 @@ def _flag_reasons(row: dict) -> list[str]:
     use_cross = "直接拼接" in preview_detail
     if use_cross:
         # 半幅偏移：外緣數學連續，高頻紋理會讓 RGB 色差偏高但不代表可視切斷
-        if "邊緣對齊" in mode or "半幅偏移" in mode:
+        if (
+            "邊緣對齊" in mode
+            or "半幅偏移" in mode
+            or "強制半幅" in mode
+        ):
             cross_limit_sum = 70.0
             cross_limit_max = 45.0
         elif icon_no_eq or "結構安全對齊" in mode:
             cross_limit_sum = 55.0
             cross_limit_max = 40.0
         else:
-            cross_limit_sum = 28.0
+            cross_limit_sum = 30.0
             cross_limit_max = 18.0
         if cross_sum > cross_limit_sum or cross_max > cross_limit_max:
             reasons.append(f"cross_seam_high:{cx}+{cy}")
@@ -379,6 +420,17 @@ def main(argv: list[str] | None = None) -> int:
         default=1600,
         help="處理前最長邊上限（加速；0=不縮放）。預設 1600",
     )
+    ap.add_argument(
+        "--dedup-name-size",
+        action="store_true",
+        help="同檔名且同大小只留第一張（跨子資料夾複本）",
+    )
+    ap.add_argument(
+        "--skip-dirs",
+        type=str,
+        default="",
+        help="略過相對路徑中出現的目錄名，逗號分隔（例如整夾備份 9,10,11）",
+    )
     args = ap.parse_args(argv)
 
     input_root = args.input.resolve()
@@ -388,7 +440,13 @@ def main(argv: list[str] | None = None) -> int:
     exclude_path = args.exclude_list or (out_dir / "exclude.txt")
 
     exclude = _load_exclude(exclude_path if exclude_path.is_file() else None)
-    files = _collect_images(input_root, exclude)
+    skip_dirs = {s.strip() for s in args.skip_dirs.split(",") if s.strip()}
+    files = _collect_images(
+        input_root,
+        exclude,
+        skip_dirs=skip_dirs,
+        dedup_name_size=bool(args.dedup_name_size),
+    )
 
     done_paths: set[str] = set()
     existing_rows: list[dict] = []

@@ -98,7 +98,7 @@ def test_96885088533() -> list[dict]:
             arr = _to_rgb_array(img, bg)
             if not looks_like_regular_lattice(arr, bg, 40.0):
                 errors.append("wreath_not_regular")
-            cropped, detail, _tier = try_discrete_lattice_crop(arr, bg, 40.0)
+            cropped, detail, _tier, _box = try_discrete_lattice_crop(arr, bg, 40.0)
             if cropped is not None and "晶格週期" in detail:
                 # 解析 px×py
                 try:
@@ -224,6 +224,109 @@ def test_prod_8_9() -> list[dict]:
     return rows
 
 
+def test_clear_edge_regress() -> list[dict]:
+    """清邊補花不得咬出白齒縫：接縫須優於或接近原圖，且勿誤判拼布為大圖章。"""
+    folder = FIXTURES / "clear_edge_regress"
+    rows: list[dict] = []
+    if not folder.is_dir():
+        print("[SKIP] no clear_edge_regress fixtures")
+        return rows
+    for path in sorted(folder.glob("*.png")):
+        row = _run_one(path)
+        errors: list[str] = []
+        v, h = row["unit_seam"]
+        sv, sh = row["src_seam"]
+        if "FAIL" in row["mode"]:
+            errors.append("mode_FAIL")
+        # 清邊不得在接縫明顯變差時勝出
+        if "清邊" in row["mode"] and (v + h) > (sv + sh) + 0.8:
+            errors.append(f"clear_edge_worsened:{sv}+{sh}->{v}+{h}")
+        if (v + h) > (sv + sh) + 1.5:
+            errors.append(f"worsened:{sv}+{sh}->{v}+{h}")
+        row["errors"] = errors
+        row["ok"] = len(errors) == 0
+        rows.append(row)
+        status = "OK" if row["ok"] else "FAIL"
+        print(f"[{status}] {path.name} {sv}+{sh}->{v}+{h} | {row['mode'][:70]}")
+        if errors:
+            print(f"         errors={errors}")
+    return rows
+
+
+def test_wechat_F_flagged() -> list[dict]:
+    """微信 F 集曾 flagged 代表例：接縫須明顯改善，禁止過短晶格週期。"""
+    folder = FIXTURES / "wechat_F_flagged"
+    rows: list[dict] = []
+    if not folder.is_dir():
+        print("[SKIP] no wechat_F_flagged fixtures")
+        return rows
+    for path in sorted(folder.glob("*.png")):
+        row = _run_one(path)
+        errors: list[str] = []
+        v, h = row["unit_seam"]
+        sv, sh = row["src_seam"]
+        if "FAIL" in row["mode"]:
+            errors.append("mode_FAIL")
+        # 相對原圖不得明顯變差；高縫源圖須壓到可視範圍
+        if (v + h) > (sv + sh) + 2.0:
+            errors.append(f"worsened:{sv}+{sh}->{v}+{h}")
+        if (v + h) > 42.0 or max(v, h) > 28.0:
+            errors.append(f"still_high:{v}+{h}")
+        m = re.search(r"晶格週期\s*(\d+)\s*[×x]\s*(\d+)", row["mode"])
+        if m and (int(m.group(1)) < 80 or int(m.group(2)) < 80):
+            errors.append(f"small_period:{m.group(1)}x{m.group(2)}")
+        row["errors"] = errors
+        row["ok"] = len(errors) == 0
+        rows.append(row)
+        status = "OK" if row["ok"] else "FAIL"
+        print(f"[{status}] {path.name} {sv}+{sh}->{v}+{h} | {row['mode'][:70]}")
+        if errors:
+            print(f"         errors={errors}")
+    return rows
+
+
+def test_prod_100() -> list[dict]:
+    """100圖代表例：密花半幅偏移、清邊不惡化、細格週期裁切可用。"""
+    folder = FIXTURES / "prod_100"
+    rows: list[dict] = []
+    if not folder.is_dir():
+        print("[SKIP] no prod_100 fixtures")
+        return rows
+    for path in sorted(folder.glob("*")):
+        if path.suffix.lower() not in {".png", ".jpg", ".jpeg"}:
+            continue
+        row = _run_one(path)
+        errors: list[str] = []
+        v, h = row["unit_seam"]
+        sv, sh = row["src_seam"]
+        if "FAIL" in row["mode"]:
+            errors.append("mode_FAIL")
+        if path.name.startswith("dense_floral"):
+            # 密花誤判大圖章時會卡在 50+ 接縫；半幅應壓到可視範圍
+            if (v + h) > 28.0 or max(v, h) > 18.0:
+                errors.append(f"dense_seam_high:{v}+{h}")
+            if "半幅" not in row["mode"] and (v + h) > (sv + sh) * 0.35:
+                errors.append("dense_no_half_offset")
+        if path.name.startswith("clear_edge"):
+            if "清邊" in row["mode"] and (v + h) > (sv + sh) + 0.8:
+                errors.append(f"clear_edge_worsened:{sv}+{sh}->{v}+{h}")
+            if (v + h) > (sv + sh) + 1.5:
+                errors.append(f"worsened:{sv}+{sh}->{v}+{h}")
+        if path.name.startswith("period_"):
+            if (v + h) > (sv + sh) * 1.05 + 1.0:
+                errors.append(f"period_worsened:{sv}+{sh}->{v}+{h}")
+            if (v + h) > 22.0:
+                errors.append(f"period_seam_high:{v}+{h}")
+        row["errors"] = errors
+        row["ok"] = len(errors) == 0
+        rows.append(row)
+        status = "OK" if row["ok"] else "FAIL"
+        print(f"[{status}] {path.name} {sv}+{sh}->{v}+{h} | {row['mode'][:70]}")
+        if errors:
+            print(f"         errors={errors}")
+    return rows
+
+
 def test_half_pitch_helper() -> None:
     """單元測試：最近鄰約 2× 軸向 pitch 時應加倍。"""
     # 磚縫格：軸向投影半週期 70，真實 NN≈140
@@ -249,7 +352,13 @@ def main() -> int:
     rows_c = test_prod_8_7()
     print("=== prod_8_9 ===")
     rows_d = test_prod_8_9()
-    all_rows = rows_a + rows_b + rows_c + rows_d
+    print("=== clear_edge_regress ===")
+    rows_e = test_clear_edge_regress()
+    print("=== wechat_F_flagged ===")
+    rows_f = test_wechat_F_flagged()
+    print("=== prod_100 ===")
+    rows_g = test_prod_100()
+    all_rows = rows_a + rows_b + rows_c + rows_d + rows_e + rows_f + rows_g
     summary = {
         "total": len(all_rows),
         "ok": sum(1 for r in all_rows if r["ok"]),

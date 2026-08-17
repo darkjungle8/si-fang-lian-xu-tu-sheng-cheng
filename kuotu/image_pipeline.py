@@ -391,13 +391,15 @@ def load_sku_sizes(excel_path: Path) -> dict[str, tuple[float, float]]:
 
 
 def build_dest(src: Path, input_path: Path, output_dir: Path) -> Path:
+    # 保留來源副檔名，避免同 stem 不同副檔名互相覆蓋
+    out_name = f"{src.name}.tif"
     if input_path.is_file():
-        return output_dir / f"{src.stem}.tif"
+        return output_dir / out_name
     try:
         rel = src.relative_to(input_path)
     except ValueError:
-        rel = Path(src.name)
-    return (output_dir / rel).with_suffix(".tif")
+        return output_dir / out_name
+    return output_dir / rel.parent / out_name
 
 
 def _under(path: Path, root: Path) -> bool:

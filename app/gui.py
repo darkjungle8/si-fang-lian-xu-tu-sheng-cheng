@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import colorchooser, filedialog, messagebox
@@ -17,6 +18,7 @@ from app.pipeline import (
     SKIP_DIR_NAMES,
     ExpandSettings,
     collect_folder_images,
+    expand_output_name,
     expand_unit,
     mirror_dest,
     normalize_expand_ext,
@@ -745,25 +747,47 @@ class SeamlessTileApp(ctk.CTk):
         auto_bg = self.auto_bg_var.get()
         manual_bg = self.bg_rgb
 
-        def worker() -> tuple[int, Path]:
+        # 單張僅記錄耗時；不因逾時降接縫品質
+        hard_warn_sec = 60.0
+        fail_notes: list[str] = []
+
+        def _blog(msg: str) -> None:
+            print(msg, flush=True)
+
+        def worker() -> tuple[int, Path, list[str]]:
             ok = 0
             total = len(files)
             expand_out.mkdir(parents=True, exist_ok=True)
+            _blog(
+                f"批次開始：共 {total} 張（接縫優先；輸出已存在則跳過不覆蓋）"
+            )
 
             for i, path in enumerate(files):
+                label = f"[{i + 1}/{total}]"
+                dest = mirror_dest(
+                    path,
+                    src_dir,
+                    expand_out,
+                    name=expand_output_name(path, expand_ext),
+                )
+                if dest.exists():
+                    _blog(f"{label} 跳過 {path.name}（輸出已存在：{dest.name}）")
+                    ok += 1
+                    self.after(0, lambda v=(i + 1) / total: self.progress.set(v))
+                    continue
+                _blog(f"{label} 開始 {path.name}")
+                t0 = time.perf_counter()
                 try:
                     img = Image.open(path)
                     img.load()
                     use_bg = None if auto_bg else manual_bg
-                    unit, _mode = make_seamless_hard_cut(
+                    unit, mode = make_seamless_hard_cut(
                         img,
                         bg=use_bg,
                         margin=margin,
                         threshold=threshold,
                         margin_is_percent=is_percent,
-                    )
-                    dest = mirror_dest(
-                        path, src_dir, expand_out, name=f"{path.stem}{expand_ext}"
+                        log=_blog,
                     )
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
@@ -774,18 +798,41 @@ class SeamlessTileApp(ctk.CTk):
                     finally:
                         tmp_path.unlink(missing_ok=True)
                     ok += 1
-                except (OSError, ValueError):
-                    pass
+                    elapsed = time.perf_counter() - t0
+                    tag = "難圖" if elapsed >= hard_warn_sec else "完成"
+                    mode_short = mode if len(mode) <= 120 else mode[:117] + "…"
+                    _blog(f"{label} {tag} {path.name} {elapsed:.1f}s | {mode_short}")
+                    if elapsed >= hard_warn_sec:
+                        fail_notes.append(
+                            f"{path.name} 耗時 {elapsed:.0f}s（演算法切換／週期搜尋偏慢）"
+                        )
+                except (OSError, ValueError) as exc:
+                    elapsed = time.perf_counter() - t0
+                    _blog(f"{label} 失敗 {path.name} {elapsed:.1f}s：{exc}")
+                    fail_notes.append(f"{path.name}：{exc}")
+                except BaseException as exc:  # noqa: BLE001 — 單張失敗不中斷整批
+                    elapsed = time.perf_counter() - t0
+                    _blog(f"{label} 異常 {path.name} {elapsed:.1f}s：{exc}")
+                    fail_notes.append(f"{path.name}：{exc}")
                 self.after(0, lambda v=(i + 1) / total: self.progress.set(v))
 
-            return ok, expand_out
+            _blog(f"批次結束：成功 {ok}/{total} → {expand_out}")
+            return ok, expand_out, fail_notes
 
         def done(result: object, error: BaseException | None) -> None:
             if error:
                 messagebox.showerror("批次失敗", str(error))
                 return
-            ok, primary = result  # type: ignore[misc]
-            messagebox.showinfo("批次完成", f"成功 {ok}/{len(files)}\n輸出：{primary}")
+            ok, primary, notes = result  # type: ignore[misc]
+            extra = ""
+            if notes:
+                extra = "\n\n難圖／失敗摘要：\n" + "\n".join(notes[:12])
+                if len(notes) > 12:
+                    extra += f"\n…另有 {len(notes) - 12} 條（見命令列）"
+            messagebox.showinfo(
+                "批次完成",
+                f"成功 {ok}/{len(files)}\n輸出：{primary}{extra}",
+            )
             self.progress.set(0)
 
         self._run_async(worker, on_done=done)

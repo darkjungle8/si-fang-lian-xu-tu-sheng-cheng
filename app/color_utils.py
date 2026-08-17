@@ -116,8 +116,8 @@ def detect_background(
 
 def color_distance(pixel: np.ndarray, bg: Sequence[int]) -> np.ndarray:
     """計算每個像素與背景色的歐氏距離。"""
-    bg_arr = np.asarray(bg, dtype=np.float64)
-    diff = pixel.astype(np.float64) - bg_arr
+    bg_arr = np.asarray(bg, dtype=np.float32)
+    diff = pixel.astype(np.float32, copy=False) - bg_arr
     return np.sqrt(np.sum(diff * diff, axis=-1))
 
 
