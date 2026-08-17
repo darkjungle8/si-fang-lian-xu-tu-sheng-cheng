@@ -111,7 +111,6 @@ SKU 模式的裁切尺寸由 Excel 尺碼決定；一般模式用右側「裁切
 ```bash
 python tests/sweep_all.py        # 全量掃描，產生可目視審查的對照圖與 HTML 索引
 python tests/regression_suite.py # 回歸集，以客觀指標守住已修好的圖
-python tests/debug_one.py "100图-1/3.jpg"   # 單張除錯，印出每個候選的評分與取捨
 ```
 
 ## 專案結構
@@ -137,7 +136,7 @@ si-fang-lian-xu-tu-sheng-cheng/
   tests/
     sweep_all.py        # 全量掃描 + 目視審查對照圖
     regression_suite.py
-    debug_one.py
+    regression_baseline.json
 ```
 
 ## 授權
