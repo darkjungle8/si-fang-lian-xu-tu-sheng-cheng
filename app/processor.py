@@ -509,6 +509,91 @@ def _diagonal_projection(gray: np.ndarray, sign: int = 1) -> np.ndarray:
     return acc / np.maximum(cnt, 1.0)
 
 
+_STRONG_AC = 0.35
+_REPEAT_ERR_SLACK = 1.4
+
+
+def _strong_axis_periods(gray: np.ndarray, axis: int) -> list[int]:
+    """
+    全圖自相關的強週期，並用重複誤差丟掉半週期。
+
+    格紋的半格（101 vs 203）自相關分數甚至更高，但相隔半格的內容對不上。
+    只靠分數會裁出「顏色接得上、結構接不上」的假單元。
+    """
+    length = gray.shape[1] if axis == 0 else gray.shape[0]
+    sig = gray.mean(0) if axis == 0 else gray.mean(1)
+    peaks = _autocorr_best_periods(
+        sig, max(16, length // 40), length // 2, top_k=5
+    )
+    scored: list[tuple[int, float, float]] = []
+    for p, score in peaks:
+        if score < _STRONG_AC:
+            continue
+        if not (length * 0.05 <= p <= length * 0.48):
+            continue
+        err = _repeat_error(gray, int(p), axis)
+        scored.append((int(p), float(score), err))
+    if not scored:
+        return []
+    best_err = min(err for _p, _s, err in scored)
+    return [p for p, _s, err in scored if err <= best_err * _REPEAT_ERR_SLACK]
+
+
+def _compact_period_jobs(
+    arr: np.ndarray, gray: np.ndarray
+) -> list[tuple[int, int, int, int]]:
+    """
+    1～3 格的小單元裁切。
+
+    舊搜尋強制覆蓋原圖 72%，密格紋／直條紋上會把 4～6 格疊在一起，
+    相位一偏內部就裂。真週期常常是兩三格（406×458、一條紋寬）。
+    """
+    h, w = arr.shape[:2]
+    xs = _strong_axis_periods(gray, 0)[:2]
+    ys = _strong_axis_periods(gray, 1)[:2]
+    jobs: list[tuple[int, int, int, int]] = []
+    max_w = int(w * 0.72)
+    max_h = int(h * 0.72)
+
+    def _add(px: int, py: int, cw: int, ch: int) -> None:
+        if cw < 64 or ch < 64 or cw > w or ch > h:
+            return
+        jobs.append((px, py, cw, ch))
+
+    if xs and ys:
+        for px in xs:
+            for py in ys:
+                for nx in (1, 2, 3):
+                    for ny in (1, 2, 3):
+                        cw, ch = nx * px, ny * py
+                        if cw > max_w or ch > max_h:
+                            continue
+                        _add(px, py, cw, ch)
+    elif xs:
+        for px in xs:
+            for nx in (1, 2, 3):
+                cw = nx * px
+                if cw <= int(w * 0.90):
+                    _add(px, h, cw, h)
+    elif ys:
+        for py in ys:
+            for ny in (1, 2, 3):
+                ch = ny * py
+                if ch <= int(h * 0.90):
+                    _add(w, py, w, ch)
+    # 去重、限制數量
+    uniq: list[tuple[int, int, int, int]] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    for job in jobs:
+        if job in seen:
+            continue
+        seen.add(job)
+        uniq.append(job)
+        if len(uniq) >= 18:
+            break
+    return uniq
+
+
 def _repeat_error(field: np.ndarray, period: int, axis: int) -> float:
     """相隔 period 的內容重複誤差（真週期驗證）。"""
     if period < 4:
@@ -1135,9 +1220,103 @@ def try_period_crop(
                         f"（偏移 {off[0]},{off[1]}，接縫分 {sc:.2f}←{base:.2f}）"
                     )
 
+    compact = _pick_compact_period_tile(arr, phase_sm, phase_scale)
+    if compact is not None:
+        tile, detail, wrap_ex, derr = compact
+        take = best_tile is None
+        if not take:
+            from app.quality import seam_report as _seam_report
+
+            old_wrap = _seam_report(best_tile).wrap_excess
+            take = wrap_ex + derr * 0.05 < old_wrap + 8.0
+        if take:
+            best_tile = tile
+            best_detail = detail
+
     if best_tile is None:
         return None, f"無穩定週期（接縫分 {base:.2f}，裁切無改善）"
     return best_tile, best_detail
+
+
+def _pick_compact_period_tile(
+    arr: np.ndarray,
+    phase_sm: np.ndarray,
+    phase_scale: float,
+) -> tuple[np.ndarray, str, float, float] | None:
+    """強自相關的 1～3 格單元。通過接縫與還原門檻才回傳。"""
+    from app.quality import design_error, seam_report
+
+    del phase_sm, phase_scale
+    gray = _luminance_map(arr)
+    jobs = _compact_period_jobs(arr, gray)
+    if not jobs:
+        return None
+    h, w = arr.shape[:2]
+    src_rep = seam_report(arr)
+    allow = max(src_rep.internal_excess, 6.0) * 1.15 + 2.0
+    best: tuple[tuple[float, float], np.ndarray, str, float, float] | None = None
+    for px, py, cw, ch in jobs:
+        tile, off = _compact_phase(arr, cw, ch, px, py)
+        rep = seam_report(tile)
+        if rep.wrap_excess > 5.0:
+            continue
+        if rep.internal_excess > allow:
+            continue
+        derr = design_error(arr, tile)
+        if derr > 35.0:
+            continue
+        key = (derr, rep.wrap_excess)
+        if best is None or key < best[0]:
+            detail = (
+                f"週期 {px}×{py}px → 單元 {cw}×{ch}"
+                f"（偏移 {off[0]},{off[1]}，小單元還原 {derr:.1f}）"
+            )
+            best = (key, tile, detail, rep.wrap_excess, derr)
+    if best is None:
+        return None
+    _key, tile, detail, wrap_ex, derr = best
+    return tile, detail, wrap_ex, derr
+
+
+def _compact_phase(
+    arr: np.ndarray, cw: int, ch: int, px: int, py: int
+) -> tuple[np.ndarray, tuple[int, int]]:
+    """環面相位：未裁的軸要滾開原 wrap，否則那一軸的舊縫會留在新單元邊上。"""
+    from app.seamless_core import torus_crop
+
+    h, w = arr.shape[:2]
+    stepx = max(2, px // 10)
+    stepy = max(2, py // 10)
+    xs: list[int]
+    ys: list[int]
+    if ch >= h:
+        ys = [h // 2]
+        xs = list(range(0, max(px, 1), stepx))
+    elif cw >= w:
+        xs = [w // 2]
+        ys = list(range(0, max(py, 1), stepy))
+    else:
+        xs = list(range(0, max(px, 1), stepx))
+        ys = list(range(0, max(py, 1), stepy))
+    best, bxy = 1e9, (xs[0], ys[0])
+    for ox in xs:
+        for oy in ys:
+            tile = torus_crop(arr, oy, ox, ch, cw)
+            sc = sum(_tile_seam_scores(tile))
+            if sc < best:
+                best, bxy = sc, (ox, oy)
+    ox, oy = bxy
+    rx = max(2, stepx // 2)
+    ry = max(2, stepy // 2)
+    for dx in range(-rx, rx + 1, 2):
+        for dy in range(-ry, ry + 1, 2):
+            x = (ox + dx) % w
+            y = (oy + dy) % h
+            sc = sum(_tile_seam_scores(torus_crop(arr, y, x, ch, cw)))
+            if sc < best:
+                best, bxy = sc, (x, y)
+    ox, oy = bxy
+    return torus_crop(arr, oy, ox, ch, cw), (ox, oy)
 
 
 def _tile_seam_scores(arr: np.ndarray) -> tuple[float, float]:

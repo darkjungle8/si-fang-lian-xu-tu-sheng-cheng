@@ -450,7 +450,16 @@ def choose(
         _lg(f"  → 採用（{len(ok)}/{len(cands)} 個候選過關）：{best.label}")
         return best
 
-    best = min(cands, key=lambda c: (c.rep.wrap_excess if c.rep else 1e9, c.cost))
+    def _fail_key(c: Candidate) -> tuple[float, float]:
+        wrap = c.rep.wrap_excess if c.rep else 1e9
+        internal_pen = 0.0
+        if c.rep is not None:
+            internal_pen = max(0.0, c.rep.internal_excess - src.internal_allow)
+        motif_allow = max(MOTIF_CUT_MAX, c.motif_dense * MOTIF_CUT_DENSE)
+        motif_pen = 400.0 * c.motif_cut if c.motif_cut > motif_allow else 0.0
+        return (wrap + internal_pen + motif_pen, c.cost)
+
+    best = min(cands, key=_fail_key)
     reasons = "／".join(best.errors)
     _lg(f"  → 全部未達標，取最接近者：{best.label}（{reasons}）")
     best.label = f"未達標［{reasons}］{best.label}"

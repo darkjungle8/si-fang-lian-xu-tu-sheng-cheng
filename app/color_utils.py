@@ -213,10 +213,18 @@ def _frame_run(line_black: np.ndarray, line_white: np.ndarray) -> tuple[int, int
 
 def has_finished_border(image: Image.Image) -> bool:
     """
-    是否為 kuotu 加過的成品框：四邊外圈近黑、內圈近白，且寬度大致均勻。
+    是否為成品外框：kuotu 外黑內白雙框，或任一單色均勻外框。
 
+    真正的判斷在 `app.triage`；這裡只是薄封裝，讓舊呼叫端不必改 import。
     黑底印花不會過這關——沒有一圈均勻白邊，黑區也不會是四邊同寬的細框。
     """
+    from app.triage import is_framed
+
+    return is_framed(image)
+
+
+def _legacy_kuotu_frame(image: Image.Image) -> bool:
+    """kuotu 外黑內白雙框（保留給 triage 與合成對照）。"""
     w, h = image.size
     if min(h, w) < 64:
         return False

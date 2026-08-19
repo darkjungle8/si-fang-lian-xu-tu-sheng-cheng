@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import multiprocessing as mp
 import os
@@ -250,9 +251,16 @@ def _sheet_name(folder: str, name: str) -> str:
     return safe
 
 
+def _write_wall_thumb(img: Image.Image, dest: Path) -> None:
+    view = img.convert("RGB")
+    view.thumbnail((240, 240), Image.Resampling.LANCZOS)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    view.save(dest, quality=85)
+
+
 def run_case(job: tuple[str, str, bool]) -> dict:
     folder, name, write_sheet = job
-    from app.color_utils import detect_background, has_finished_border
+    from app.color_utils import detect_background
     from app.processor import _to_rgb_array, make_seamless_hard_cut
     from app.quality import (
         axis_line_energy,
@@ -261,17 +269,24 @@ def run_case(job: tuple[str, str, bool]) -> dict:
         seam_report,
         tone_shift,
     )
+    from app.triage import VERDICT_TILEABLE, triage
 
     path = _job_path(folder, name)
     row: dict = {"folder": folder, "name": name}
     try:
         img = Image.open(path)
         img.load()
-        if has_finished_border(img):
-            row["skipped"] = "finished_border"
-            row["mode"] = "跳過：成品黑白邊"
+        decision = triage(img)
+        row["triage"] = decision.verdict
+        if decision.verdict != VERDICT_TILEABLE:
+            row["skipped"] = decision.verdict
+            row["mode"] = decision.describe()
             row["errors"] = []
             row["elapsed_s"] = 0.0
+            if write_sheet:
+                thumb = OUT / "wall" / f"skip__{_sheet_name(folder, name)}.jpg"
+                _write_wall_thumb(img.convert("RGB"), thumb)
+                row["wall"] = str(thumb.relative_to(OUT))
             return row
 
         bg = detect_background(img)
@@ -322,6 +337,10 @@ def run_case(job: tuple[str, str, bool]) -> dict:
             dest.parent.mkdir(parents=True, exist_ok=True)
             sheet.save(dest)
             row["sheet"] = str(dest.relative_to(OUT))
+            tiled = Image.fromarray(plain_tile_2x2(out))
+            thumb = OUT / "wall" / f"{tag}__{_sheet_name(folder, name)}.jpg"
+            _write_wall_thumb(tiled, thumb)
+            row["wall"] = str(thumb.relative_to(OUT))
     except Exception as exc:  # noqa: BLE001 — 批次要繼續
         row["error"] = f"{exc}"
         row["trace"] = traceback.format_exc(limit=6)
@@ -371,40 +390,131 @@ def _init_worker(src: str, out: str) -> None:
     _lower_priority()
 
 
+def _content_hash(folder: str, name: str) -> str:
+    path = _job_path(folder, name)
+    return hashlib.md5(path.read_bytes()).hexdigest()
+
+
+def dedup_pairs(
+    pairs: list[tuple[str, str]],
+) -> tuple[list[tuple[str, str]], dict[str, list[tuple[str, str]]]]:
+    """依內容雜湊去重，回傳（代表張, hash→全部路徑）。"""
+    groups: dict[str, list[tuple[str, str]]] = {}
+    order: list[str] = []
+    for item in pairs:
+        digest = _content_hash(*item)
+        if digest not in groups:
+            order.append(digest)
+            groups[digest] = []
+        groups[digest].append(item)
+    unique = [groups[h][0] for h in order]
+    return unique, groups
+
+
+def replicate_duplicates(
+    rows: list[dict],
+    groups: dict[str, list[tuple[str, str]]],
+) -> list[dict]:
+    """把代表張的結果套到內容相同的其他路徑。"""
+    by_key = {(r.get("folder") or "", r.get("name") or ""): r for r in rows}
+    extra: list[dict] = []
+    for members in groups.values():
+        primary = members[0]
+        prow = by_key.get(primary)
+        if prow is None:
+            continue
+        for dup in members[1:]:
+            copy = dict(prow)
+            copy["folder"], copy["name"] = dup
+            copy["duplicate_of"] = f"{primary[0]}/{primary[1]}" if primary[0] else primary[1]
+            extra.append(copy)
+    return extra
+
+
+def _bucket(row: dict) -> str:
+    if row.get("error") or (row.get("errors") and "EXCEPTION" in row["errors"]):
+        return "fail"
+    skipped = row.get("skipped")
+    if skipped == "framed":
+        return "skip_framed"
+    if skipped == "not_pattern":
+        return "skip_cover"
+    if skipped:
+        return "skip_cover"
+    if row.get("errors"):
+        return "fail"
+    mode = row.get("mode") or ""
+    wrap = float(row.get("wrap_excess") or 0)
+    derr = float(row.get("design_error") or 0)
+    if "未達標" in mode or wrap > 2.0 or derr > 40.0:
+        return "suspect"
+    return "pass"
+
+
 def write_index(rows: list[dict]) -> Path:
-    """依嚴重度排序的 HTML 索引，方便一路往下看。"""
+    """分區 2×2 審查牆：FAIL／可疑／跳過-封面／跳過-有框／PASS。"""
+    titles = (
+        ("fail", "FAIL 未通過"),
+        ("suspect", "可疑（接縫灰帶／還原偏高／未達標）"),
+        ("skip_cover", "跳過：產品封面圖"),
+        ("skip_framed", "跳過：成品外框"),
+        ("pass", "PASS"),
+    )
+    buckets: dict[str, list[dict]] = {k: [] for k, _ in titles}
+    for r in rows:
+        if r.get("duplicate_of"):
+            continue
+        buckets[_bucket(r)].append(r)
 
-    def severity(r: dict) -> tuple:
-        return (
-            -len(r.get("errors") or []),
-            -(r.get("wrap_excess") or 0),
-            -(r.get("internal_excess") or 0),
-        )
-
-    visible = [r for r in rows if r.get("sheet")]
-    ordered = sorted(visible, key=severity)
-    n_fail = sum(1 for r in rows if r.get("errors"))
-    n_skip = sum(1 for r in rows if r.get("skipped"))
-    n_run = len(rows) - n_skip
+    n_fail = len(buckets["fail"])
+    n_skip = len(buckets["skip_cover"]) + len(buckets["skip_framed"])
+    n_run = sum(1 for r in rows if not r.get("skipped") and not r.get("duplicate_of"))
     parts = [
         "<!doctype html><meta charset='utf-8'>",
-        "<style>body{font:14px system-ui;background:#f6f6f6;margin:16px}"
-        "img{max-width:100%;border:1px solid #ccc;background:#fff}"
-        "div{margin-bottom:18px}</style>",
-        f"<h2>掃描 {n_run} 張（跳過成品框 {n_skip}），未通過 {n_fail}</h2>",
+        "<title>四方連續 2×2 審查牆</title>",
+        "<style>"
+        "body{font:14px system-ui;background:#111;color:#eee;margin:16px}"
+        "h2{margin:28px 0 8px}"
+        ".grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}"
+        "figure{margin:0;background:#1c1c1c;padding:6px;border-radius:6px}"
+        "img{width:100%;aspect-ratio:1;object-fit:contain;background:#000;display:block}"
+        "figcaption{font-size:11px;margin-top:6px;color:#bbb;word-break:break-all}"
+        "a{color:#9cf}"
+        "</style>",
+        f"<h1>掃描 {n_run} 張（跳過 {n_skip}），未通過 {n_fail}</h1>",
     ]
-    for r in ordered:
-        parts.append(f"<div><img src='{r['sheet']}'></div>")
+    for key, title in titles:
+        items = buckets[key]
+        parts.append(f"<h2>{title}（{len(items)}）</h2>")
+        parts.append('<div class="grid">')
+        for r in items:
+            wall = r.get("wall") or r.get("sheet") or ""
+            sheet = r.get("sheet") or wall
+            label = f"{r.get('folder') or ''}/{r.get('name')}"
+            cap = r.get("mode") or r.get("skipped") or ""
+            if r.get("errors"):
+                cap = "／".join(r["errors"]) + " " + cap
+            href = sheet if sheet else "#"
+            src = wall if wall else sheet
+            if not src:
+                continue
+            parts.append(
+                "<figure>"
+                f"<a href='{href}' target='_blank'><img src='{src}' alt=''></a>"
+                f"<figcaption>{label}<br>{cap[:160]}</figcaption>"
+                "</figure>"
+            )
+        parts.append("</div>")
     dest = OUT / "index.html"
     dest.write_text("\n".join(parts), encoding="utf-8")
     return dest
 
 
 def inventory(src: Path, probe: int = 80) -> int:
-    """清點例圖並抽檢成品框偵測（含合成對照，避免誤殺黑底印花）。"""
+    """清點例圖並抽檢分流（含合成對照，避免誤殺黑底印花）。"""
     from PIL import ImageOps
 
-    from app.color_utils import has_finished_border
+    from app.triage import VERDICT_FRAMED, VERDICT_TILEABLE, triage
 
     pairs = collect(src, "", 0)
     by_ext: dict[str, int] = {}
@@ -414,7 +524,6 @@ def inventory(src: Path, probe: int = 80) -> int:
     print(f"來源 {src}")
     print(f"共 {len(pairs)} 張  {by_ext}")
 
-    # 合成：成品雙框應為 True；黑底印花（無白框）應為 False
     flower = Image.new("RGB", (240, 240), (40, 120, 80))
     for y in range(40, 200, 24):
         for x in range(40, 200, 24):
@@ -423,15 +532,15 @@ def inventory(src: Path, probe: int = 80) -> int:
     framed = ImageOps.expand(framed, border=12, fill="black")
     black_print = Image.new("RGB", (240, 240), (8, 8, 8))
     ImageDraw.Draw(black_print).ellipse((60, 60, 180, 180), fill=(180, 30, 40))
-    ok_frame = has_finished_border(framed)
-    ok_black = not has_finished_border(black_print)
-    ok_plain = not has_finished_border(flower)
+    ok_frame = triage(framed).verdict == VERDICT_FRAMED
+    ok_black = triage(black_print).verdict == VERDICT_TILEABLE
+    ok_plain = triage(flower).verdict == VERDICT_TILEABLE
     print(
         f"合成偵測  成品框={ok_frame}  黑底印花(應否)={ok_black}  "
         f"無框花布(應否)={ok_plain}"
     )
     if not (ok_frame and ok_black and ok_plain):
-        print("成品框偵測合成對照失敗")
+        print("分流合成對照失敗")
         return 1
 
     n_skip = 0
@@ -442,21 +551,21 @@ def inventory(src: Path, probe: int = 80) -> int:
         path = src / folder / name if folder else src / name
         try:
             with Image.open(path) as im:
-                hit = has_finished_border(im)
+                hit = triage(im)
         except Exception as exc:  # noqa: BLE001
             n_err += 1
             print(f"  開圖失敗 {folder}/{name}: {exc}")
             continue
-        if hit:
+        if hit.verdict != VERDICT_TILEABLE:
             n_skip += 1
             if shown_skip < 5:
-                print(f"  SKIP {folder}/{name}")
+                print(f"  SKIP {folder}/{name}  {hit.describe()}")
                 shown_skip += 1
         elif shown_keep < 5:
             print(f"  KEEP {folder}/{name}")
             shown_keep += 1
     print(
-        f"抽檢前 {min(probe, len(pairs))} 張：成品框 {n_skip}，"
+        f"抽檢前 {min(probe, len(pairs))} 張：跳過 {n_skip}，"
         f"待跑 {min(probe, len(pairs)) - n_skip - n_err}，開圖失敗 {n_err}"
     )
     return 0
@@ -480,6 +589,11 @@ def main() -> int:
         "--failed-from",
         default="",
         help="只重跑該 report.json 裡 errors 非空的圖",
+    )
+    ap.add_argument(
+        "--no-dedup",
+        action="store_true",
+        help="不去重，每條路徑都跑",
     )
     args = ap.parse_args()
     _configure_stdio()
@@ -506,6 +620,13 @@ def main() -> int:
     if not pairs:
         print("沒有符合的圖")
         return 1
+
+    groups: dict[str, list[tuple[str, str]]] | None = None
+    n_listed = len(pairs)
+    if not args.no_dedup:
+        unique, groups = dedup_pairs(pairs)
+        print(f"去重 {n_listed} → {len(unique)} 張唯一內容")
+        pairs = unique
 
     small = [(f, n) for f, n in pairs if _pixels(f, n) < HUGE_PIXELS]
     huge = [(f, n) for f, n in pairs if _pixels(f, n) >= HUGE_PIXELS]
@@ -554,6 +675,12 @@ def main() -> int:
                 rows.append(r)
                 report(r)
 
+    if groups is not None:
+        extras = replicate_duplicates(rows, groups)
+        rows.extend(extras)
+        if extras:
+            print(f"重複內容套用結果 {len(extras)} 張", flush=True)
+
     elapsed = time.perf_counter() - t0
     suffix = f"_{args.tag}" if args.tag else ""
     report_path = OUT / f"report{suffix}.json"
@@ -569,10 +696,20 @@ def main() -> int:
     n_skip = sum(1 for r in rows if r.get("skipped"))
     n_fail = sum(1 for r in rows if r.get("errors"))
     n_unchanged = sum(1 for r in rows if r.get("unchanged"))
+    n_dup = sum(1 for r in rows if r.get("duplicate_of"))
     n_run = len(rows) - n_skip
     print(f"\n{'=' * 70}")
-    print(f"完成 {len(rows)} 張（跑 {n_run}，跳過成品框 {n_skip}），耗時 {elapsed / 60:.1f} 分")
+    print(
+        f"完成 {len(rows)} 張（跑 {n_run - n_dup}，"
+        f"跳過 {n_skip}，重複 {n_dup}），耗時 {elapsed / 60:.1f} 分"
+    )
     print(f"未通過 {n_fail}／原圖直出 {n_unchanged}")
+    skip_reasons: dict[str, int] = {}
+    for r in rows:
+        if r.get("skipped") and not r.get("duplicate_of"):
+            skip_reasons[str(r["skipped"])] = skip_reasons.get(str(r["skipped"]), 0) + 1
+    for k, v in sorted(skip_reasons.items(), key=lambda kv: -kv[1]):
+        print(f"  跳過 {k}: {v}")
     reasons: dict[str, int] = {}
     for r in rows:
         for e in r.get("errors") or []:

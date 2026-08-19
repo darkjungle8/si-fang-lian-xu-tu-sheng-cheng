@@ -26,6 +26,7 @@ from app.pipeline import (
 )
 from app.color_io import intermediate_suffix, save_image
 from app.processor import make_seamless_hard_cut, tile_2x2_multi
+from app.triage import VERDICT_TILEABLE, triage
 
 EXPAND_FILETYPES = [
     ("TIFF", "*.tif;*.tiff"),
@@ -611,9 +612,12 @@ class SeamlessTileApp(ctk.CTk):
             return
         self._run_async(self._process_worker, on_done=self._on_process_done)
 
-    def _process_worker(self) -> tuple[Image.Image, Image.Image, tuple[int, int, int], str, tuple[int, int]]:
+    def _process_worker(self) -> tuple[Image.Image | None, Image.Image | None, tuple[int, int, int] | None, str, tuple[int, int] | None]:
         margin, is_percent, threshold = self._params()
         assert self.source_image is not None
+        decision = triage(self.source_image)
+        if decision.verdict != VERDICT_TILEABLE:
+            return None, None, None, decision.describe(), None
         used_bg = (
             detect_background(self.source_image)
             if self.auto_bg_var.get()
@@ -634,6 +638,14 @@ class SeamlessTileApp(ctk.CTk):
             messagebox.showerror("處理失敗", str(error))
             return
         unit, preview, used_bg, mode, seam = result  # type: ignore[misc]
+        if unit is None:
+            self.unit_image = None
+            self.preview_2x2 = None
+            self._seam_cross = None
+            self.view_mode.set("原圖")
+            self.status_label.configure(text=mode)
+            self._refresh_preview()
+            return
         self.unit_image = unit
         self.preview_2x2 = preview
         self._seam_cross = seam
@@ -759,12 +771,13 @@ class SeamlessTileApp(ctk.CTk):
         def _blog(msg: str) -> None:
             print(msg, flush=True)
 
-        def worker() -> tuple[int, Path, list[str]]:
+        def worker() -> tuple[int, int, Path, list[str]]:
             ok = 0
+            skipped = 0
             total = len(files)
             expand_out.mkdir(parents=True, exist_ok=True)
             _blog(
-                f"批次開始：共 {total} 張（接縫優先；輸出已存在則跳過不覆蓋）"
+                f"批次開始：共 {total} 張（接縫優先；封面／有框直接跳過；輸出已存在則跳過不覆蓋）"
             )
 
             for i, path in enumerate(files):
@@ -785,6 +798,12 @@ class SeamlessTileApp(ctk.CTk):
                 try:
                     img = Image.open(path)
                     img.load()
+                    decision = triage(img)
+                    if decision.verdict != VERDICT_TILEABLE:
+                        skipped += 1
+                        _blog(f"{label} {decision.describe()} {path.name}")
+                        self.after(0, lambda v=(i + 1) / total: self.progress.set(v))
+                        continue
                     use_bg = None if auto_bg else manual_bg
                     unit, mode = make_seamless_hard_cut(
                         img,
@@ -823,14 +842,14 @@ class SeamlessTileApp(ctk.CTk):
                     fail_notes.append(f"{path.name}：{exc}")
                 self.after(0, lambda v=(i + 1) / total: self.progress.set(v))
 
-            _blog(f"批次結束：成功 {ok}/{total} → {expand_out}")
-            return ok, expand_out, fail_notes
+            _blog(f"批次結束：成功 {ok}/{total}，跳過 {skipped} → {expand_out}")
+            return ok, skipped, expand_out, fail_notes
 
         def done(result: object, error: BaseException | None) -> None:
             if error:
                 messagebox.showerror("批次失敗", str(error))
                 return
-            ok, primary, notes = result  # type: ignore[misc]
+            ok, skipped, primary, notes = result  # type: ignore[misc]
             extra = ""
             if notes:
                 extra = "\n\n難圖／失敗摘要：\n" + "\n".join(notes[:12])
@@ -838,7 +857,7 @@ class SeamlessTileApp(ctk.CTk):
                     extra += f"\n…另有 {len(notes) - 12} 條（見命令列）"
             messagebox.showinfo(
                 "批次完成",
-                f"成功 {ok}/{len(files)}\n輸出：{primary}{extra}",
+                f"成功 {ok}/{len(files)}，跳過 {skipped}\n輸出：{primary}{extra}",
             )
             self.progress.set(0)
 
@@ -866,7 +885,7 @@ class SeamlessTileApp(ctk.CTk):
         manual_bg = self.bg_rgb
         logs: list[str] = []
 
-        def worker() -> tuple[int, int, Path]:
+        def worker() -> tuple[int, int, int, Path]:
             results = run_full_pipeline(
                 src_dir,
                 output_dir=out_dir,
@@ -882,18 +901,19 @@ class SeamlessTileApp(ctk.CTk):
                 log=logs.append,
                 on_progress=lambda v: self.after(0, lambda: self.progress.set(v)),
             )
-            ok = sum(1 for r in results if not r.error)
-            return ok, len(results), out_dir
+            ok = sum(1 for r in results if not r.error and not r.skipped)
+            skipped = sum(1 for r in results if r.skipped)
+            return ok, skipped, len(results), out_dir
 
         def done(result: object, error: BaseException | None) -> None:
             if error:
                 messagebox.showerror("SKU 批次失敗", str(error))
                 return
-            ok, total, out = result  # type: ignore[misc]
+            ok, skipped, total, out = result  # type: ignore[misc]
             detail = "\n".join(logs[-8:]) if logs else ""
             messagebox.showinfo(
                 "SKU 批次完成",
-                f"成功 {ok}/{total}\n輸出：{out}\n\n{detail}",
+                f"成功 {ok}/{total}，跳過 {skipped}\n輸出：{out}\n\n{detail}",
             )
             self.progress.set(0)
 

@@ -36,7 +36,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.color_utils import detect_background, has_finished_border
+from app.color_utils import detect_background
 from app.processor import _to_rgb_array, make_seamless_hard_cut
 from app.quality import (
     axis_line_energy,
@@ -45,6 +45,7 @@ from app.quality import (
     seam_report,
     tone_shift,
 )
+from app.triage import VERDICT_TILEABLE, triage
 
 SRC = ROOT / "samples" / "F"
 BASELINE = Path(__file__).resolve().parent / "regression_baseline.json"
@@ -123,12 +124,13 @@ def run_case(folder: str, name: str) -> dict:
     path = _job_path(folder, name)
     img = Image.open(path)
     img.load()
-    if has_finished_border(img):
+    decision = triage(img)
+    if decision.verdict != VERDICT_TILEABLE:
         return {
             "folder": folder,
             "name": name,
-            "skipped": "finished_border",
-            "mode": "跳過：成品黑白邊",
+            "skipped": decision.verdict,
+            "mode": decision.describe(),
             "errors": [],
         }
     bg = detect_background(img)
@@ -194,6 +196,7 @@ def check(row: dict) -> list[str]:
 
 
 def main() -> int:
+    global SRC
     ap = argparse.ArgumentParser()
     ap.add_argument("--write-baseline", action="store_true")
     ap.add_argument("--reported-only", action="store_true")
@@ -201,7 +204,6 @@ def main() -> int:
     ap.add_argument("--only", default="", help="只跑檔名含此字串的案例")
     args = ap.parse_args()
 
-    global SRC
     SRC = Path(args.src)
 
     cases = list(REPORTED)

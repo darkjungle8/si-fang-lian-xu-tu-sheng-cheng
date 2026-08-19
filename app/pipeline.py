@@ -13,6 +13,7 @@ from app.color_io import intermediate_suffix, save_image
 from app.color_utils import detect_background
 from app.paths import ensure_kuotu_on_path
 from app.processor import make_seamless_hard_cut, tile_2x2_multi
+from app.triage import VERDICT_TILEABLE, triage
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 SKIP_DIR_NAMES = frozenset({"output", "pipeline_out", "__pycache__"})
@@ -106,6 +107,7 @@ class PipelineItemResult:
     sku: str | None = None
     crop_w_cm: float | None = None
     crop_h_cm: float | None = None
+    skipped: bool = False
 
     @property
     def tiff_path(self) -> str | None:
@@ -211,6 +213,12 @@ def _process_one_image(
     )
     img = Image.open(path)
     img.load()
+    decision = triage(img)
+    if decision.verdict != VERDICT_TILEABLE:
+        item.skipped = True
+        item.mode = decision.describe()
+        log(f"  跳過 {path.name}：{item.mode}")
+        return item
     use_bg = None if auto_bg else manual_bg
     if use_bg is None:
         use_bg = detect_background(img)
@@ -369,8 +377,10 @@ def run_full_pipeline(
         if on_progress is not None:
             on_progress((i + 1) / total)
 
-    ok_n = sum(1 for r in results if not r.error)
-    log(f"\n完成：成功 {ok_n}/{total} → {out}")
+    ok_n = sum(1 for r in results if not r.error and not r.skipped)
+    skip_n = sum(1 for r in results if r.skipped)
+    fail_n = sum(1 for r in results if r.error)
+    log(f"\n完成：成功 {ok_n}/{total}，跳過 {skip_n}，失敗 {fail_n} → {out}")
     return results
 
 
@@ -522,6 +532,11 @@ def _run_sku_pipeline(
         if on_progress is not None:
             on_progress(i / total)
 
-    ok_n = sum(1 for r in results if not r.error)
-    log(f"\n完成：成功 {ok_n}/{total}（略過資料夾 {skipped}）→ {out}")
+    ok_n = sum(1 for r in results if not r.error and not r.skipped)
+    skip_n = sum(1 for r in results if r.skipped)
+    fail_n = sum(1 for r in results if r.error)
+    log(
+        f"\n完成：成功 {ok_n}/{total}，跳過 {skip_n}，失敗 {fail_n}"
+        f"（略過資料夾 {skipped}）→ {out}"
+    )
     return results

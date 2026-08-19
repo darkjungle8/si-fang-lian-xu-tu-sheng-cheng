@@ -1,0 +1,371 @@
+{
+ "covers": [
+  {
+   "path": "27/10号推单-11号发货/25179430912/1ea576005f0a42c8aaaea1a16d27960c-goods.jpeg",
+   "label": "not_pattern",
+   "why": "goods"
+  },
+  {
+   "path": "27/10号推单-11号发货/64745422059/ac22d3ac5d19453b9e86d5a38d8dc6fb-goods.jpeg",
+   "label": "not_pattern",
+   "why": "goods"
+  },
+  {
+   "path": "3/Art Time Together/WB2608043708741/19654106110/第1单：SKU19654106110-50x25厘米-12片-3件.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "3/Art Time Together/WB2608044030871/18994288478/第1单：SKU18994288478-76x76厘米-4片-1件.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "3/Art Time Together/WB2608044030871/45893584098/第1单：SKU45893584098-76x76厘米-4片-1件.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "3/Art Time Together/WB2608044030946/60971362163/第2单：SKU60971362163-76x76厘米-4片-1件.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "3/Art Time Together/WB2608045224370/44389345909/第1单：SKU44389345909-尺码：9.45-19.7英寸-第2张.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "3/Art Time Together/WB2608045224370/44389345909/第1单：SKU44389345909-尺码：9.45-19.7英寸.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "3/Art Time Together/WB2608051034042/44117378008/第1单：SKU44117378008-型号：WYY2025126-12 尺码：50厘米-45厘米.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "3/Art Time Together/WB2608051034199/15669191914/第1单：SKU15669191914-76x76厘米-4片-1件.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "3/Art Time Together/WB2608052252480/95667040320/第1单：SKU95667040320-25x25厘米-10片-1件.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "3/Art Time Together/WB2608055041832/22771666964/第1单：SKU22771666964-50x40厘米-6片-1件.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "4/DIY Play Studio/WB2608044758663/45189918413/第1单：SKU45189918413-20x25厘米-5片-1件.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "4/DIY Play Studio/WB2608045385941/90847854970/第1单：SKU90847854970-20x100厘米-12片-1件.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "4/DIY Play Studio/WB2608045498593/45845950990/第1单：SKU45845950990-40x50厘米-5片-1件.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "4/DIY Play Studio/WB2608045693053/79046572374/第1单：SKU79046572374-尺码：9.45-19.7英寸-第2张.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "4/DIY Play Studio/WB2608045693053/79046572374/第1单：SKU79046572374-尺码：9.45-19.7英寸.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "4/DIY Play Studio/WB2608046001604/83626367595/第1单：SKU83626367595-40x50厘米-8片-1件.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "7/MOKLUX/WB2608043858826/18499634639/第2单：SKU18499634639-风格：花猫 尺码：19.68×17.7 inch.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "7/MOKLUX/WB2608044478686/51452574453/第1单：SKU51452574453-数量：4 尺码：45cm - 55cm-第2张.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "7/MOKLUX/WB2608044478686/51452574453/第1单：SKU51452574453-数量：4 尺码：45cm - 55cm.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "7/MOKLUX/WB2608044534674/88054972916/第1单：SKU88054972916-45x55厘米-4片-1件.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "7/MOKLUX/WB2608044878871/56948021638/第1单：SKU56948021638-尺码：9.45-19.7英寸 数量：12.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "7/MOKLUX/WB2608045385993/17001124766/第1单：SKU17001124766-160x50厘米-1片-1件.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "7/MOKLUX/WB2608052081654/19508506243/第1单：SKU19508506243-45x50厘米-6片-1件.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "7/MOKLUX/WB2608052447359/17375653339/第1单：SKU17375653339-25x50厘米-12片-1件.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "7/MOKLUX/WB2608052937720/57513467765/第1单：SKU57513467765-40x50厘米-8片-1件.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "7/MOKLUX/WB260805744583/58019962554/第1单：SKU58019962554-数量：12 尺码：19.7-9.45英寸.jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  },
+  {
+   "path": "8/Playful Prints DIY/WB2608055556261/32883674110/第1单：SKU32883674110-型号：17.8 x 19.6 英寸(40 x 50 厘米).jpg",
+   "label": "not_pattern",
+   "why": "listing"
+  }
+ ],
+ "tileable_hard": [
+  {
+   "path": "0/SKU生成结果/51452574453/004.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "0/SKU生成结果/58019962554/002.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "0/SKU生成结果/58019962554/004.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "0/SKU生成结果/58019962554/005.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "0/SKU生成结果/58019962554/006.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "0/SKU生成结果/58019962554/007.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "0/SKU生成结果/79046572374/229.tif",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "0/SKU生成结果/89135931169/114.tif",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "1/sku生成结果2/11101322661/001.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "1/sku生成结果2/11101322661/006.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "1/sku生成结果2/11101322661/007.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "1/sku生成结果2/11101322661/012.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "1/sku生成结果2/11101322661/014.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "1/sku生成结果2/27538881301/004.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "1/sku生成结果2/28279417383/001.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "17/8—7/13758792906/ChatGPT Image 2026年8月7日 09_32_32 (1).png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "19/8-8推单图/28267248005/ChatGPT Image 2026年8月8日 13_03_22.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "19/8-8推单图/31606815538/ChatGPT Image 2026年8月8日 13_08_06.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "2/华昌/37748703715/1cbed3ab-7603-4fd9-8068-ac0f4ddcf3e8.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "2/华昌/42470395563/df499b96-3fe0-495e-9507-417989079c74.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "2/华昌/45532834251/2bc5c05a-4ae6-40ae-9d72-6cc61910cacf.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "21/47235152577/ChatGPT Image 2026年8月8日 17_39_04 (7).png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "26/8.9推单-810发货/10445985005/ChatGPT Image 2026年8月9日 19_41_13 (1).png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "26/8.9推单-810发货/28894187836/ChatGPT Image 2026年8月9日 19_54_44 (2).png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "26/8.9推单-810发货/28894187836/ChatGPT Image 2026年8月9日 19_54_44 (3).png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "26/8.9推单-810发货/28894187836/ChatGPT Image 2026年8月9日 19_54_45 (5).png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "26/8.9推单-810发货/28894187836/ChatGPT Image 2026年8月9日 19_57_05 (3).png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "26/8.9推单-810发货/28894187836/ChatGPT Image 2026年8月9日 19_57_06 (5).png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "3/Art Time Together/WB2608044030946/89135931169/kgjh-4-花色01-1.jpg",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "3/Art Time Together/WB2608044030946/89135931169/kgjh-4-花色04-1.jpg",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "3/Art Time Together/WB2608045300861/87818126084/提取6个花色制作四方连续图 (2).png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "3/Art Time Together/WB2608045300861/87818126084/提取6个花色制作四方连续图.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "3/Art Time Together/WB2608052252480/95667040320/10.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "5/Little Hands Print/WB2608045426926/36733100518/花色1_薄荷绿底复古玫瑰蕾丝_四方连续.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "5/Little Hands Print/WB2608053260751/50132639973/7c384364-1699-4afa-b31f-5c06e0d2bbfe.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "7/MOKLUX/WB2608044478686/51452574453/21ad1031-f6dc-4da1-af8f-6fcc59eb11e8.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "7/MOKLUX/WB2608044478686/51452574453/5e6ff8cd-513b-4924-b15a-47c9fd3f4bef.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "7/MOKLUX/WB260805744583/58019962554/13fea324-f3a0-4b3a-8c44-ef604ee972d4.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "7/MOKLUX/WB260805744583/58019962554/220cadc9-359d-4d7a-8b0c-1365aec5c913.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "7/MOKLUX/WB260805744583/58019962554/4f8048ab-607b-4f0b-8eca-9b0b60b81a50.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "7/MOKLUX/WB260805744583/58019962554/809c75fc-8e48-4e34-90f8-48efbd4ba669.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "7/MOKLUX/WB260805744583/58019962554/87d7455e-3f1a-4f5d-b383-186850027f51.png",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "8/Playful Prints DIY/WB2608054207321/20724079981/05_caramel_abstract_fur.jpg",
+   "label": "tileable",
+   "why": "stationary-false-kill-watercolor-or-patchwork"
+  },
+  {
+   "path": "22/60770679474/9244ab453ace451595c77a6e78dddd91-goods.jpeg",
+   "label": "tileable",
+   "why": "dense-building-pattern-not-cover"
+  }
+ ]
+}
