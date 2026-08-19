@@ -1,10 +1,10 @@
 """跑無縫之前的分流：成品外框與產品封面圖直接跳過。
 
 判斷一律看畫面內容，不看檔名。四方連續花布是空間平穩的——任一象限
-的顏色分佈都該差不多；產品封面圖（疊布棚拍、尺寸表、行銷字）不是。
+的顏色分佈都該差不多；產品封面圖（尺寸表、行銷字、半張空白）不是。
 非平穩還不夠：水彩暈染、拼布格、大色階漸層同樣非平穩，但那就是設計。
-所以要再加一道棚拍證據（背景布打光、半張空白、或高對比行銷文字排版）
-才判定跳過。寧可放過不可錯殺。
+所以要再加一道證據（半張空白、或高對比行銷文字排版）才判定跳過。
+寧可放過不可錯殺。
 """
 
 from __future__ import annotations
@@ -28,14 +28,8 @@ _ANALYZE_SIDE = 256
 _QUAD_MIN = 0.08
 _HET_MIN = 20.0
 
-# 棚拍背景：與邊相連的近平坦區，且深處亮度有平滑漸層。
-# 花布自己的地色也連邊，但前景是均勻散開的；棚拍的布捲／疊布會擠在畫面一側。
-_BG_FRAC_MIN = 0.12
-_BG_FRAC_MAX = 0.50
+# 連邊地色：半張空白用。花布地色也會連邊，不能單憑面積當封面。
 _BG_COLOR_DIST = 22.0
-_BACKDROP_RANGE_MIN = 9.0
-_FG_CV_MIN = 0.14
-_HET_STUDIO = 24.0
 
 # 半張空白：一邊幾乎是地色、對邊有內容。稀疏點綴不會這麼極端。
 _LOPSIDED_HIGH = 0.80
@@ -43,7 +37,7 @@ _LOPSIDED_LOW = 0.35
 
 # 行銷字：字母狀小連通域排成水平列。密花也會觸發，故不能單獨當跳過條件。
 _TEXT_ROW_MIN = 6
-# 數位拼貼封面（多塊花布 + 橫幅字）沒有棚拍背景，但非平穩且文字列很多。
+# 數位拼貼封面（多塊花布 + 橫幅字）：非平穩且文字列很多。
 # 硬花布的 text_rows 雖高，quad 通常 < 0.12；門檻取自校準集空隙。
 _TEXT_LAYOUT_ROWS = 16
 _TEXT_LAYOUT_QUAD = 0.32
@@ -159,38 +153,6 @@ def _edge_connected_bg(arr: np.ndarray) -> np.ndarray:
     for i in keep:
         lut[i] = True
     return lut[labels]
-
-
-def _backdrop(arr: np.ndarray, bg: np.ndarray) -> dict[str, float]:
-    """棚拍背景布：連邊平坦區夠大，且深處亮度有平滑漸層。"""
-    bg_frac = float(bg.mean())
-    if bg_frac < _BG_FRAC_MIN or int(bg.sum()) < 500:
-        return {"bg_frac": bg_frac, "backdrop_range": 0.0}
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-    deep = cv2.erode(bg.astype(np.uint8), kernel).astype(bool)
-    if int(deep.sum()) < 200:
-        return {"bg_frac": bg_frac, "backdrop_range": 0.0}
-    lum = _luminance(arr)
-    blur = cv2.GaussianBlur(lum, (0, 0), 8)
-    vals = blur[deep]
-    spread = float(np.percentile(vals, 95) - np.percentile(vals, 5))
-    return {"bg_frac": bg_frac, "backdrop_range": spread}
-
-
-def _fg_cluster(bg: np.ndarray) -> dict[str, float]:
-    """前景在 4×4 格子上的密度變異係數。棚拍高、滿鋪花布低。"""
-    fg = (~bg).astype(np.float32)
-    grid = 4
-    side = fg.shape[0] // grid
-    dens = np.empty((grid, grid), dtype=np.float64)
-    for i in range(grid):
-        for j in range(grid):
-            dens[i, j] = float(
-                fg[i * side : (i + 1) * side, j * side : (j + 1) * side].mean()
-            )
-    mean = float(dens.mean())
-    cv = float(dens.std() / (mean + 1e-6))
-    return {"fg_cv": cv}
 
 
 def _lopsided_blank(bg: np.ndarray) -> dict[str, float]:
@@ -374,38 +336,26 @@ def triage(image: Image.Image) -> Triage:
     arr = _resize_rgb(image, _ANALYZE_SIDE)
     stat = _stationarity(arr)
     bg = _edge_connected_bg(arr)
-    back = _backdrop(arr, bg)
-    cluster = _fg_cluster(bg)
     lop = _lopsided_blank(bg)
     text = _text_density(arr)
     signals.update(stat)
-    signals.update(back)
-    signals.update(cluster)
     signals.update(lop)
     signals.update(text)
 
     nonstat = stat["quad"] > _QUAD_MIN and stat["het"] > _HET_MIN
-    studio = False
-    if (
-        _BG_FRAC_MIN <= back["bg_frac"] <= _BG_FRAC_MAX
-        and back["backdrop_range"] >= _BACKDROP_RANGE_MIN
-        and cluster["fg_cv"] >= _FG_CV_MIN
-        and stat["het"] > _HET_STUDIO
-    ):
-        studio = True
-        reasons.append(f"棚拍背景漸層{back['backdrop_range']:.0f}")
+    cover = False
     if lop["lopsided"] >= 1.0:
-        studio = True
+        cover = True
         reasons.append("半張空白")
     if (
         nonstat
         and text["text_rows"] >= _TEXT_LAYOUT_ROWS
         and stat["quad"] >= _TEXT_LAYOUT_QUAD
     ):
-        studio = True
+        cover = True
         reasons.append(f"行銷文字排版{text['text_rows']:.0f}列")
 
-    if nonstat and studio:
+    if nonstat and cover:
         return Triage(VERDICT_NOT_PATTERN, reasons, signals)
     return Triage(VERDICT_TILEABLE, [], signals)
 

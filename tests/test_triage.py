@@ -93,8 +93,6 @@ class CalibrationTests(unittest.TestCase):
                     f"{item['path']} -> {result.verdict} {result.reasons} "
                     f"quad={result.signals.get('quad', 0):.3f} "
                     f"het={result.signals.get('het', 0):.1f} "
-                    f"bg={result.signals.get('bg_frac', 0):.2f} "
-                    f"grad={result.signals.get('backdrop_range', 0):.1f} "
                     f"text={result.signals.get('text_rows', 0):.0f} "
                     f"lop={result.signals.get('lopsided', 0):.0f}"
                 )
