@@ -36,7 +36,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.color_utils import detect_background
+from app.color_utils import detect_background, has_finished_border
 from app.processor import _to_rgb_array, make_seamless_hard_cut
 from app.quality import (
     axis_line_energy,
@@ -46,8 +46,9 @@ from app.quality import (
     tone_shift,
 )
 
-SRC = Path(r"D:\5EDemocache\continue\100图")
+SRC = ROOT / "samples" / "F"
 BASELINE = Path(__file__).resolve().parent / "regression_baseline.json"
+EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".bmp"}
 
 # 使用者實際回報過有問題的圖，以及當初的症狀。
 # 症狀只作紀錄用，斷言一律走客觀指標。
@@ -77,7 +78,7 @@ REPORTED: list[tuple[str, str, str]] = [
 ]
 
 _SAMPLE_SEED = 20260817
-_SAMPLE_PER_FOLDER = 15
+_SAMPLE_N = 40
 
 # 與 tests/sweep_all.py 共用同一組門檻
 # 與 app.select.SEAM_OK 一致：取自整批稿件的目視校準，超出量 5 以下看不見
@@ -89,30 +90,47 @@ TONE_MAX = 4.0
 DESIGN_MAX = 90.0
 
 
+def _job_path(folder: str, name: str) -> Path:
+    return (SRC / folder / name) if folder else SRC / name
+
+
+def iter_images(src: Path):
+    for p in sorted(src.rglob("*")):
+        if not p.is_file() or p.suffix.lower() not in EXTS:
+            continue
+        rel = p.relative_to(src)
+        folder = "" if rel.parent == Path(".") else rel.parent.as_posix()
+        yield folder, rel.name, p
+
+
 def sampled_cases() -> list[tuple[str, str, str]]:
     """從資料夾隨機抽樣（固定 seed），排除已在回報清單裡的圖。"""
     reported = {(f, n) for f, n, _ in REPORTED}
     rng = random.Random(_SAMPLE_SEED)
-    out: list[tuple[str, str, str]] = []
-    for folder in ("100图-1", "100图-2"):
-        d = SRC / folder
-        if not d.is_dir():
+    pool: list[tuple[str, str, str]] = []
+    if not SRC.is_dir():
+        return []
+    for folder, name, _path in iter_images(SRC):
+        if (folder, name) in reported:
             continue
-        pool = sorted(
-            p.name
-            for p in d.glob("*.*")
-            if p.suffix.lower() in {".jpg", ".jpeg", ".png"}
-            and (folder, p.name) not in reported
-        )
-        for name in rng.sample(pool, min(_SAMPLE_PER_FOLDER, len(pool))):
-            out.append((folder, name, "抽樣"))
-    return out
+        pool.append((folder, name, "抽樣"))
+    if not pool:
+        return []
+    return rng.sample(pool, min(_SAMPLE_N, len(pool)))
 
 
 def run_case(folder: str, name: str) -> dict:
-    path = SRC / folder / name
+    path = _job_path(folder, name)
     img = Image.open(path)
     img.load()
+    if has_finished_border(img):
+        return {
+            "folder": folder,
+            "name": name,
+            "skipped": "finished_border",
+            "mode": "跳過：成品黑白邊",
+            "errors": [],
+        }
     bg = detect_background(img)
     src = _to_rgb_array(img, bg)
     s_rep = seam_report(src)
@@ -179,8 +197,12 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--write-baseline", action="store_true")
     ap.add_argument("--reported-only", action="store_true")
+    ap.add_argument("--src", default=str(SRC), help="例圖根目錄（遞迴）")
     ap.add_argument("--only", default="", help="只跑檔名含此字串的案例")
     args = ap.parse_args()
+
+    global SRC
+    SRC = Path(args.src)
 
     cases = list(REPORTED)
     if not args.reported_only:
@@ -196,7 +218,7 @@ def main() -> int:
     n_fail = 0
     n_regress = 0
     for i, (folder, name, note) in enumerate(cases, 1):
-        path = SRC / folder / name
+        path = _job_path(folder, name)
         key = f"{folder}/{name}"
         if not path.exists():
             print(f"[{i}/{len(cases)}] SKIP {key}（不存在）")
@@ -207,6 +229,9 @@ def main() -> int:
             print(f"[{i}/{len(cases)}] ERROR {key}: {exc}")
             rows[key] = {"error": str(exc), "note": note}
             n_fail += 1
+            continue
+        if row.get("skipped"):
+            print(f"[{i}/{len(cases)}] SKIP {key}  {row['skipped']}")
             continue
         row["note"] = note
         errs = check(row)

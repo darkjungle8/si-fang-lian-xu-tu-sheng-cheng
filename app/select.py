@@ -82,6 +82,17 @@ CLIP_MAX = 0.02
 DESIGN_MAX_CROP = 35.0
 # 非裁切類只擋災難級的破壞，細緻的判斷交給接縫與色偏門檻。
 DESIGN_MAX = 90.0
+# 切線穿過圖案的容許比例。切線每列只移動一格，穿過 1% 的長度就足以把一
+# 個圖案剖半——實測那張條紋大象只有 8% 的切線壓在象身上，成品卻是一隻
+# 沒有身體的象頭。留一點餘裕給抗鋸齒與 JPEG 雜訊誤標的零星像素。
+MOTIF_CUT_MAX = 0.01
+# 密花圖放寬：容許量隨重疊帶裡的圖案占比成長。
+#
+# 殘肢要醒目，得先有素底讓人看出「這東西缺了一半」。滿版碎花整條帶子都是
+# 花，切線根本無路可繞，切到也認不出是哪一朵被剖開——實測兩張密花稿切到
+# 2.2%／2.3%，1:1 檢視完全看不出來；而稀疏的條紋大象只切 8% 就是一隻沒有
+# 身體的象頭。用帶內圖案占比當尺，正好分開這兩種情況。
+MOTIF_CUT_DENSE = 0.12
 
 # 這裡沒有幾何門檻是刻意的。它原本是為了擋錯切對齊把拼布格扳斜，但錯切
 # 機制已經整個移除，現存的算子全是像素搬移或逐通道平移，不可能扳斜。留著
@@ -117,6 +128,18 @@ class Candidate:
     dup: float = 0.0
     """最小誤差切造成的內容重複比例。"""
 
+    motif_cut: float = 0.0
+    """
+    最小誤差切線穿過圖案的比例。
+
+    切線穿過一個只存在於單側的圖案時，該圖案會一半取自頭端、一半取自尾端，
+    留下半隻大象、孤立的長頸鹿犄角這種殘肢。殘肢兩側在原稿裡本來就相鄰，
+    對邊色差是零，`seam_report` 看不到它——這是唯一能抓到的量。
+    """
+
+    motif_dense: float = 0.0
+    """重疊帶裡屬於圖案的面積比。密花圖切線無路可繞，判定時據此放寬。"""
+
     rep: SeamReport | None = None
     errors: list[str] = field(default_factory=list)
     cost: float = 0.0
@@ -132,6 +155,9 @@ def apply_recipe(arr: np.ndarray, recipe: list[tuple[str, object]]) -> np.ndarra
         if kind == "crop":
             y0, x0, ch, cw = param  # type: ignore[misc]
             out = torus_crop(out, y0, x0, ch, cw)
+        elif kind == "inset":
+            y0, x0, ch, cw = param  # type: ignore[misc]
+            out = out[y0 : y0 + ch, x0 : x0 + cw]
         elif kind == "mincut":
             out = replay_mincut(out, param)  # type: ignore[arg-type]
         elif kind == "periodize":
@@ -193,6 +219,9 @@ def measure(src: SourceFacts, cand: Candidate) -> Candidate:
     has_crop = bool(cand.recipe) and any(k == "crop" for k, _ in cand.recipe)
     if derr > (DESIGN_MAX_CROP if has_crop else DESIGN_MAX):
         errs.append(f"設計被改壞:{derr:.0f}")
+    motif_allow = max(MOTIF_CUT_MAX, cand.motif_dense * MOTIF_CUT_DENSE)
+    if cand.motif_cut > motif_allow:
+        errs.append(f"切線剖開圖案:{cand.motif_cut:.1%}")
     if src.needs_native and cand.recipe is None:
         errs.append("無法保色")
 
@@ -202,6 +231,9 @@ def measure(src: SourceFacts, cand: Candidate) -> Candidate:
         + cand.color_mean * 8.0
         + cand.color_low * 0.6
         + cand.dup * 20.0
+        # 殘肢比殘縫更醒目：縫是一條線，殘肢是一個認得出來、卻缺了一半的
+        # 圖案。權重要壓得過「還原度」，否則寧可留著殘肢也不肯換一刀。
+        + cand.motif_cut * 400.0
         # 接縫代價超線性：殘縫是這個工具唯一不能妥協的東西，愈接近門檻
         # 就愈值得付代價去修。線性權重會讓「超出 4.0 的波點稿」寧可留著
         # 那顆被切台階的白點，也不肯接受一次乾淨的週期裁切。
@@ -255,9 +287,12 @@ def make_seamless_variants(
                 lossless,
                 _r(("mincut", mi)),
                 dup=dup,
+                motif_cut=mi.motif_cut,
+                motif_dense=mi.motif_dense,
             )
         )
-        if seam_report(cut).wrap_excess > 0.5:
+        cut_rep = seam_report(cut)
+        if cut_rep.wrap_excess > 0.5:
             per, pi = periodize(cut)
             out.append(
                 Candidate(
@@ -269,8 +304,85 @@ def make_seamless_variants(
                     color_low=color_shift(cut, per).lowfreq,
                     clipped=pi.clipped,
                     dup=dup,
+                    motif_cut=mi.motif_cut,
+                    motif_dense=mi.motif_dense,
                 )
             )
+
+        def _add_mincut(cut_arr: np.ndarray, info, tag: str) -> None:
+            dup_i = info.dup_v * info.band_v / max(base.shape[1], 1) + (
+                info.dup_h * info.band_h / max(base.shape[0], 1)
+            )
+            out.append(
+                Candidate(
+                    cut_arr,
+                    f"{label}＋{tag}{info.describe()}",
+                    lossless,
+                    _r(("mincut", info)),
+                    dup=dup_i,
+                    motif_cut=info.motif_cut,
+                    motif_dense=info.motif_dense,
+                )
+            )
+            if seam_report(cut_arr).wrap_excess > 0.5:
+                peri, pinfo = periodize(cut_arr)
+                out.append(
+                    Candidate(
+                        peri,
+                        f"{label}＋{tag}{info.describe()}＋{pinfo.describe()}",
+                        False,
+                        _r(("mincut", info), ("periodize", None)),
+                        color_mean=pinfo.shift_mean,
+                        color_low=color_shift(cut_arr, peri).lowfreq,
+                        clipped=pinfo.clipped,
+                        dup=dup_i,
+                        motif_cut=info.motif_cut,
+                        motif_dense=info.motif_dense,
+                    )
+                )
+
+        # 第一刀仍剖開圖案、或縫還沒壓到門檻時，加寬重疊帶再切。
+        # 不放寬閘門，只是多給構造上仍無縫的候選。寬帶候選一律進選單，
+        # 不要只在「殘肢變少」時才收下——縫從 5.8 降到 4.9 同樣該比。
+        allow = max(MOTIF_CUT_MAX, mi.motif_dense * MOTIF_CUT_DENSE)
+        internal_allow = (
+            max(rep.internal_excess, INTERNAL_FLOOR) * INTERNAL_SLACK
+            + INTERNAL_MARGIN
+        )
+        internal_worse = cut_rep.internal_excess > internal_allow
+        if (
+            mi.motif_cut > allow
+            or cut_rep.wrap_excess > SEAM_OK
+            or internal_worse
+        ):
+            for frac, tag in ((0.42, "寬帶"), (0.50, "更寬帶")):
+                cut_w, mi_w = wrap_mincut(
+                    base, do_v=do_v, do_h=do_h, max_band_frac=frac
+                )
+                _add_mincut(cut_w, mi_w, tag)
+
+        if do_v and do_h and (mi.motif_cut > allow or internal_worse):
+            for dv, dh, tag in ((True, False, "只V"), (False, True, "只H")):
+                for frac, ftag in (
+                    (0.25, tag),
+                    (0.42, f"{tag}寬帶"),
+                    (0.50, f"{tag}更寬帶"),
+                ):
+                    c1, m1 = wrap_mincut(
+                        base, do_v=dv, do_h=dh, max_band_frac=frac
+                    )
+                    _add_mincut(c1, m1, ftag)
+
+        if do_v and do_h and internal_worse:
+            for frac, tag in ((0.25, "先H"), (0.42, "先H寬帶"), (0.50, "先H更寬帶")):
+                ch, mh = wrap_mincut(
+                    base,
+                    do_v=True,
+                    do_h=True,
+                    max_band_frac=frac,
+                    h_first=True,
+                )
+                _add_mincut(ch, mh, tag)
 
     # 縫純粹來自整體光照／色溫落差時，不必動結構
     per0, pi0 = periodize(base)
@@ -305,6 +417,9 @@ def choose(
 ) -> Candidate:
     """
     對每個基底展開無縫變體，過閘門後取成本最低者。
+
+    閘門與成本都是圖種無關的量（接縫超出、殘肢、色偏、還原），不對檔名
+    寫特例；新稿件走同一條路。全部過不了閘門仍標「未達標」，不當沉默退回原圖。
 
     全部都過不了閘門時，退而求其次取「接縫超出量最小」的那個，並在說明
     字串標上「未達標」，讓掃描報告能把它撈出來——沉默地退回原圖正是舊

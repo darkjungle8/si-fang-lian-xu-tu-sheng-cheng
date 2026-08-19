@@ -11,6 +11,7 @@ venv/
 .env
 
 # 本機產物 / 測試
+samples/
 _samples/
 _batch_*/
 _debug_*/

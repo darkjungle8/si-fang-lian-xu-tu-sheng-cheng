@@ -7,7 +7,8 @@
 
 1. `wrap_mincut`：在邊緣重疊帶裡找一條最小誤差切線，把首尾縫合。
    全部像素都直接來自原稿，**色值零改動**，代價是單元尺寸縮小、
-   接縫附近有少量內容重複。
+   接縫附近有少量內容重複。切線會繞開頭尾對不上的區域，避免把同一個
+   圖案切成兩個來源（詳見 `_seam_cost`）。
 2. `periodize`：Moisan periodic + smooth 分解。把不連續量表示成一個
    解 Poisson 方程的極平滑場並減掉，數學上保證完全週期。細節完全不糊，
    代價是疊上一層平滑的明暗修正。
@@ -37,8 +38,29 @@ _PROFILE_LOWPASS_FRAC = 0.05
 
 # 重疊帶寬度候選（占該軸邊長比例）。窄帶保留較多內容，寬帶讓切線有更多
 # 迴避空間；實際採用哪個由切線成本決定。
-_BAND_FRACTIONS = (0.04, 0.08, 0.14, 0.22)
+_BAND_FRACTIONS = (0.04, 0.08, 0.14, 0.22, 0.30, 0.36, 0.46)
 _BAND_MIN_PX = 12
+# 除固定比例外，另外掃出幾個「頭尾本來就吻合」的帶寬（見 `_shift_mismatch`）。
+_BAND_SCAN_KEEP = 8
+# 掃描時沿線方向的分塊數。帶寬只決定另一軸的相位，線方向可以大幅降取樣。
+_BAND_SCAN_BLOCKS = 48
+
+# 重疊帶裡「頭尾對不上」的區域，也就是有東西只存在於單側。切線從中穿過
+# 時，同一個圖案會一半取自頭端、一半取自尾端，長出半隻大象、孤立的長頸鹿
+# 犄角這種殘肢。這種殘肢的對邊色差是零（切線兩側在原稿裡本來就相鄰），
+# 接縫指標一律量不到，只能在下刀前就避開。
+#
+# 反過來說，頭尾在該處長得一樣就可以放心切——兩側顯示的是同一個東西。
+# 所以判準是「兩側是否一致」，不是「這裡有沒有圖案」，也就不需要背景色。
+_MOTIF_DIFF_MIN = 8.0
+# 對不上區域的中位數倍率。整體有色偏或條紋相位略錯的圖，滿帶都有小落差，
+# 固定門檻會把整條帶子標成不可穿越，反而讓迴避機制失效。
+_MOTIF_DIFF_MEDIAN = 2.5
+# 遮罩外擴比例（占短邊）。貼著輪廓走會削掉抗鋸齒邊緣，留一點餘裕。
+_MOTIF_DILATE_FRAC = 0.002
+# 穿越一列圖案的代價。要大到讓切線寧可繞完整條帶子也不穿過去，但保持有限
+# 值——密花圖整條帶子都對不上時無路可繞，那時就該退回比基礎色差。
+_MOTIF_PENALTY = 1.0e7
 
 
 def _as_3d(arr: np.ndarray) -> np.ndarray:
@@ -76,12 +98,27 @@ def _min_cost_path(cost: np.ndarray) -> np.ndarray:
     return path
 
 
-def _seam_cost(arr: np.ndarray, band: int) -> np.ndarray:
-    """重疊帶內每個位置的接合誤差（平方色距）。"""
+def _seam_cost(arr: np.ndarray, band: int) -> tuple[np.ndarray, np.ndarray]:
+    """
+    重疊帶內每個位置的接合誤差（平方色距），與不可穿越遮罩。
+
+    遮罩標出頭尾對不上的區域。切線只要不與某個對不上的連通塊相交，該塊就
+    整塊落在切線的同一側，於是整塊取自頭端或整塊被尾端取代，不會被拼成
+    兩個來源的混合體。切線每列只移動一格（八連通），四連通的區塊跨不過去，
+    這個保證是純幾何的。
+    """
     w = arr.shape[1]
     head = arr[:, :band].astype(np.float32)
     tail = arr[:, w - band :].astype(np.float32)
-    return ((tail - head) ** 2).sum(axis=2)
+    diff = tail - head
+    cost = (diff**2).sum(axis=2)
+    mag = np.abs(diff).mean(axis=2)
+    thr = max(_MOTIF_DIFF_MIN, float(np.median(mag)) * _MOTIF_DIFF_MEDIAN)
+    mask = (mag > thr).astype(np.uint8)
+    k = int(round(min(arr.shape[0], w) * _MOTIF_DILATE_FRAC)) | 1
+    if k >= 3:
+        mask = cv2.dilate(mask, np.ones((k, k), np.uint8))
+    return cost, mask
 
 
 def _cyclic_path(cost: np.ndarray) -> np.ndarray:
@@ -96,9 +133,17 @@ def _cyclic_path(cost: np.ndarray) -> np.ndarray:
     阻擋值一定要用 `inf`。用「最大成本 × 帶寬」這種有限大數，在列數遠多
     於帶寬時（該圖是 10356 列對 774 帶寬）會被累積成本蓋過去，釘點形同
     虛設。
+
+    釘點取兩端成本之和最低者。自由路徑的兩端是首選，但它只保證自己那一端
+    便宜；釘點同時是首列與末列的落點，若那個位置在另一端剛好壓在圖案上，
+    整條帶子就白繞了。
     """
     free = _min_cost_path(cost)
-    pin = int(free[0]) if cost[0, free[0]] <= cost[-1, free[-1]] else int(free[-1])
+    ends = cost[0] + cost[-1]
+    pin = min(
+        (int(free[0]), int(free[-1]), int(np.argmin(ends))),
+        key=lambda c: float(ends[c]),
+    )
     pinned = cost.copy()
     for row in (0, -1):
         keep = pinned[row, pin]
@@ -118,48 +163,113 @@ def _splice_axis(arr: np.ndarray, band: int, path: np.ndarray) -> np.ndarray:
     return out
 
 
-def _cut_axis(
-    arr: np.ndarray, band: int, *, cyclic: bool = False
-) -> tuple[np.ndarray, np.ndarray, float, float]:
+def _solve_axis(
+    arr: np.ndarray, band: int, *, cyclic: bool
+) -> tuple[np.ndarray, float, float, float]:
     """
-    沿垂直方向縫合首尾。回傳 (輸出, 切線, 切線平均誤差, 取自尾端的比例)。
+    求一條切線，回傳 (切線, 平均色差, 穿過圖案的比例, 帶內圖案占比)。
 
-    輸出寬度為 w - band：尾端 band 欄被吃掉，與首端 band 欄依切線合成。
-    切線被禁止落在第 0 欄，否則 wrap 邊界會原封不動保留舊縫。
+    懲罰壓倒基礎色差，所以解出來的就是「穿過圖案最少」的路線。換句話說
+    回傳的 cut 是該帶寬下的下限：cut 大於零代表這個帶寬繞不過去，不是
+    演算法沒盡力。帶內圖案占比則說明繞不過去有多合理——整條帶子都是圖案
+    時當然無路可繞。
+    """
+    h = arr.shape[0]
+    cost, mask = _seam_cost(arr, band)
+    blocked = cost + mask * _MOTIF_PENALTY
+    # 切線不能落在第 0 欄，否則 wrap 邊界會原封不動保留舊縫
+    blocked[:, 0] = np.inf
+    path = _cyclic_path(blocked) if cyclic else _min_cost_path(blocked)
+    rows = np.arange(h)
+    err = float(np.sqrt(cost[rows, path] / arr.shape[2]).mean())
+    cut = float(mask[rows, path].mean())
+    return path, err, cut, float(mask.mean())
+
+
+def _shift_mismatch(arr: np.ndarray, max_band: int) -> np.ndarray:
+    """
+    每個帶寬（1..max_band）的頭尾平均落差。
+
+    帶寬決定單元寬度 w−band，而單元能無縫拼接，等價於「原稿平移 w−band 後
+    與自己重合」。所以帶寬不是可以隨便挑的自由參數：圖案週期的整數倍剛好
+    落在 w−band 時，頭尾帶會逐像素吻合，切線無處可切也不必切，接縫與圖案
+    韻律同時保住；差幾十個像素，整條帶子就全是對不上的區域，切線無論怎麼
+    走都得剖開圖案。
+
+    固定的幾個比例命中這種帶寬純屬碰運氣。與其去估週期（要對付亞像素、多重
+    週期、只有單軸有週期），不如直接把每個帶寬的落差掃出來排序。
+
+    沿線方向先做分塊平均：帶寬只影響另一軸的相位，線方向的細節對排序沒有
+    貢獻，降下來才掃得動四位數的帶寬範圍。
     """
     h, w = arr.shape[:2]
-    cost = _seam_cost(arr, band)
-    # 切線不能落在第 0 欄，否則 wrap 邊界會原封不動保留舊縫
-    cost[:, 0] = np.inf
-    path = _cyclic_path(cost) if cyclic else _min_cost_path(cost)
-    chan = arr.shape[2]
-    err = float(np.sqrt(cost[np.arange(h), path] / chan).mean())
-    dup = float((np.arange(band)[None, :] < path[:, None]).mean())
-    return _splice_axis(arr, band, path), path, err, dup
+    blocks = min(_BAND_SCAN_BLOCKS, h)
+    edges = np.linspace(0, h, blocks + 1).astype(np.int64)
+    sig = np.stack(
+        [
+            arr[a:b].astype(np.float32).mean(axis=0)
+            for a, b in zip(edges[:-1], edges[1:])
+        ]
+    ).reshape(blocks, w, -1)
+    out = np.full(max_band + 1, np.inf, dtype=np.float64)
+    for b in range(1, max_band + 1):
+        out[b] = float(np.abs(sig[:, :b] - sig[:, w - b :]).mean())
+    return out
 
 
-def _pick_band(arr: np.ndarray, max_band: int) -> tuple[int, float]:
-    """挑重疊帶寬度：切線誤差最低者優先，同分時取窄的（少犧牲內容）。"""
+def _band_candidates(arr: np.ndarray, max_band: int) -> list[int]:
+    """值得試的重疊帶寬度：固定比例打底，再加上頭尾本來就吻合的幾個。"""
     w = arr.shape[1]
-    best: tuple[int, float] | None = None
-    seen: set[int] = set()
-    for frac in _BAND_FRACTIONS:
-        band = int(round(w * frac))
-        band = max(_BAND_MIN_PX, min(band, max_band))
-        if band < 2 or band in seen:
-            continue
-        seen.add(band)
-        cost = _seam_cost(arr, band)
-        cost[:, 0] = np.inf
-        path = _min_cost_path(cost)
-        err = float(
-            np.sqrt(cost[np.arange(arr.shape[0]), path] / arr.shape[2]).mean()
-        )
+    lo = min(_BAND_MIN_PX, max_band)
+    hi = max(lo, max_band)
+    bands = {max(lo, min(int(round(w * f)), hi)) for f in _BAND_FRACTIONS}
+
+    if hi >= lo + 8:
+        mism = _shift_mismatch(arr, hi)
+        # 谷底附近的帶寬彼此差不多，隔開來取才會拿到不同的谷
+        apart = max(8, hi // 20)
+        picked: list[int] = []
+        for b in np.argsort(mism[: hi + 1]):
+            band = int(b)
+            if band < lo or any(abs(band - c) <= apart for c in picked):
+                continue
+            picked.append(band)
+            if len(picked) >= _BAND_SCAN_KEEP:
+                break
+        bands.update(picked)
+    return sorted(b for b in bands if b >= 2)
+
+
+# 一條切線只要穿過圖案就會留下殘肢，代價遠高於多吃掉一點邊長。權重要大到
+# 讓「乾淨的寬帶」永遠勝過「有殘肢的窄帶」。
+_CUT_PENALTY = 1000.0
+
+
+def _cut_axis(
+    arr: np.ndarray, max_band: int, *, cyclic: bool = False
+) -> tuple[np.ndarray, int, np.ndarray, float, float, float, float]:
+    """
+    挑帶寬並沿垂直方向縫合首尾。
+
+    回傳 (輸出, 帶寬, 切線, 平均色差, 穿過圖案比例, 帶內圖案占比, 取自尾端比例)。
+    輸出寬度為 w − 帶寬：尾端該幾欄被吃掉，與首端幾欄依切線合成。
+
+    帶寬與切線一起挑：能讓切線完全繞開圖案的帶寬優先，都繞不開時才比平均
+    色差，同分取窄的少犧牲內容。
+    """
+    w = arr.shape[1]
+    max_band = min(max_band, w // 2)
+    best: tuple[float, int, np.ndarray, float, float, float] | None = None
+    for band in _band_candidates(arr, max_band):
+        path, err, cut, dense = _solve_axis(arr, band, cyclic=cyclic)
         # 每多吃 1% 邊長，容許誤差放寬一點點，避免為了 0.1 階去砍掉四分之一畫面
-        score = err + (band / float(w)) * 3.0
-        if best is None or score < best[1]:
-            best = (band, score)
-    return best if best is not None else (max(2, min(_BAND_MIN_PX, max_band)), 0.0)
+        score = cut * _CUT_PENALTY + err + (band / float(w)) * 3.0
+        if best is None or score < best[0]:
+            best = (score, band, path, err, cut, dense)
+    assert best is not None
+    _, band, path, err, cut, dense = best
+    dup = float((np.arange(band)[None, :] < path[:, None]).mean())
+    return _splice_axis(arr, band, path), band, path, err, cut, dense, dup
 
 
 @dataclass(frozen=True)
@@ -177,12 +287,31 @@ class MincutInfo:
     err_h: float
     dup_v: float
     dup_h: float
+    cut_v: float = 0.0
+    cut_h: float = 0.0
+    """切線穿過圖案的比例。大於零表示有圖案被切成兩個來源，會留下殘肢。"""
+
+    dense_v: float = 0.0
+    dense_h: float = 0.0
+    """重疊帶裡屬於圖案的面積比。用來判斷「繞不過去」有多合理。"""
+
     path_v: np.ndarray | None = None
     path_h: np.ndarray | None = None
+    h_first: bool = False
+    """為真時先切水平再切垂直；重放必須同一順序，否則內部會再裂開。"""
 
     @property
     def applied(self) -> bool:
         return self.band_v > 0 or self.band_h > 0
+
+    @property
+    def motif_cut(self) -> float:
+        return max(self.cut_v, self.cut_h)
+
+    @property
+    def motif_dense(self) -> float:
+        """切得最兇那一軸的帶內圖案占比。"""
+        return self.dense_v if self.cut_v >= self.cut_h else self.dense_h
 
     def describe(self) -> str:
         parts = []
@@ -190,18 +319,32 @@ class MincutInfo:
             parts.append(f"V帶{self.band_v}px誤差{self.err_v:.1f}")
         if self.band_h:
             parts.append(f"H帶{self.band_h}px誤差{self.err_h:.1f}")
+        if self.motif_cut > 0:
+            parts.append(
+                f"切到圖案{self.motif_cut:.1%}（帶內圖案{self.motif_dense:.0%}）"
+            )
         return "最小誤差切(" + "，".join(parts) + ")" if parts else "未切"
 
 
 def replay_mincut(arr: np.ndarray, info: MincutInfo) -> np.ndarray:
     """在另一份像素資料上重放同一組切線。"""
     a = _as_3d(arr)
-    if info.path_v is not None:
-        a = _splice_axis(a, info.band_v, info.path_v)
-    if info.path_h is not None:
-        t = np.ascontiguousarray(np.swapaxes(a, 0, 1))
+
+    def _h(x: np.ndarray) -> np.ndarray:
+        t = np.ascontiguousarray(np.swapaxes(x, 0, 1))
         t = _splice_axis(t, info.band_h, info.path_h)
-        a = np.ascontiguousarray(np.swapaxes(t, 0, 1))
+        return np.ascontiguousarray(np.swapaxes(t, 0, 1))
+
+    if info.h_first:
+        if info.path_h is not None:
+            a = _h(a)
+        if info.path_v is not None:
+            a = _splice_axis(a, info.band_v, info.path_v)
+    else:
+        if info.path_v is not None:
+            a = _splice_axis(a, info.band_v, info.path_v)
+        if info.path_h is not None:
+            a = _h(a)
     return a[:, :, 0] if arr.ndim == 2 else a
 
 
@@ -211,6 +354,7 @@ def wrap_mincut(
     do_v: bool = True,
     do_h: bool = True,
     max_band_frac: float = 0.25,
+    h_first: bool = False,
 ) -> tuple[np.ndarray, MincutInfo]:
     """
     以最小誤差切線縫合首尾，讓單元真正四方連續。
@@ -223,26 +367,52 @@ def wrap_mincut(
     band_v = band_h = 0
     err_v = err_h = 0.0
     dup_v = dup_h = 0.0
+    cut_v = cut_h = 0.0
+    dense_v = dense_h = 0.0
     path_v = path_h = None
     out = a
 
-    if do_v and w >= 4 * _BAND_MIN_PX:
-        band_v, _ = _pick_band(out, int(w * max_band_frac))
-        out, path_v, err_v, dup_v = _cut_axis(out, band_v)
+    def _v(x: np.ndarray, *, cyclic: bool) -> tuple:
+        return _cut_axis(
+            x, min(int(x.shape[1] * max_band_frac), x.shape[1] // 2), cyclic=cyclic
+        )
 
-    # 水平刀一律環形：它按欄位在「取上緣／取下緣」之間切換，若首欄與末欄
-    # 切在不同列，同一列的頭尾就會來自不同來源，垂直方向的連續性當場破功。
-    # 垂直刀不需要，它的兩端在下一刀就被吃掉了。
-    if do_h and h >= 4 * _BAND_MIN_PX:
-        t = np.ascontiguousarray(np.swapaxes(out, 0, 1))
-        band_h, _ = _pick_band(t, int(h * max_band_frac))
-        t, path_h, err_h, dup_h = _cut_axis(t, band_h, cyclic=True)
-        out = np.ascontiguousarray(np.swapaxes(t, 0, 1))
+    def _h(x: np.ndarray, *, cyclic: bool) -> tuple:
+        t = np.ascontiguousarray(np.swapaxes(x, 0, 1))
+        t, b, p, e, c, d, u = _cut_axis(
+            t, min(int(t.shape[1] * max_band_frac), t.shape[1] // 2), cyclic=cyclic
+        )
+        return np.ascontiguousarray(np.swapaxes(t, 0, 1)), b, p, e, c, d, u
+
+    # 後刀一律環形：按欄位在「取上緣／取下緣」切換時，若首欄與末欄切在不同
+    # 列，先縫好的那一軸會在帶子裡被打斷。
+    if h_first:
+        if do_h and h >= 4 * _BAND_MIN_PX:
+            out, band_h, path_h, err_h, cut_h, dense_h, dup_h = _h(out, cyclic=False)
+        if do_v and out.shape[1] >= 4 * _BAND_MIN_PX:
+            out, band_v, path_v, err_v, cut_v, dense_v, dup_v = _v(out, cyclic=True)
+    else:
+        if do_v and w >= 4 * _BAND_MIN_PX:
+            out, band_v, path_v, err_v, cut_v, dense_v, dup_v = _v(out, cyclic=False)
+        if do_h and out.shape[0] >= 4 * _BAND_MIN_PX:
+            out, band_h, path_h, err_h, cut_h, dense_h, dup_h = _h(out, cyclic=True)
 
     if arr.ndim == 2:
         out = out[:, :, 0]
     return out, MincutInfo(
-        band_v, band_h, err_v, err_h, dup_v, dup_h, path_v, path_h
+        band_v,
+        band_h,
+        err_v,
+        err_h,
+        dup_v,
+        dup_h,
+        cut_v,
+        cut_h,
+        dense_v,
+        dense_h,
+        path_v,
+        path_h,
+        h_first,
     )
 
 

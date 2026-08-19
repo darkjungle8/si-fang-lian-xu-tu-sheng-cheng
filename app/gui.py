@@ -450,6 +450,7 @@ class SeamlessTileApp(ctk.CTk):
             crop_h_cm=float(self.crop_h_var.get() or "30"),
             white_cm=float(self.white_cm_var.get()),
             black_cm=float(self.black_cm_var.get()),
+            force_dpi=True,
         )
 
     def _set_bg(self, rgb: tuple[int, int, int]) -> None:

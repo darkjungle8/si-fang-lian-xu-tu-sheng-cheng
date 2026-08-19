@@ -92,7 +92,7 @@ class ExpandSettings:
     crop_h_cm: float = 30.0
     white_cm: float = 0.2
     black_cm: float = 0.1
-    force_dpi: bool = False
+    force_dpi: bool = True
 
 
 @dataclass

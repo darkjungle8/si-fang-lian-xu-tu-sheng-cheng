@@ -290,15 +290,18 @@ def color_shift(before: np.ndarray, after: np.ndarray) -> ColorShift:
 
 def tone_shift(src: np.ndarray, out: np.ndarray) -> float:
     """
-    整體色調偏移，不要求同尺寸（週期裁切會改尺寸）。
+    整體色調偏移。
 
-    比較兩張圖的通道均值。裁切本身會因為取樣不同而有小幅差異，所以這個
-    值只用來抓「整片偏青／偏暗」這種等級的問題。
+    只在同尺寸時比通道均值：那才是週期化／色彩轉換把整片拉亮、拉青的情況。
+    最小誤差切與週期裁切會改尺寸，像素仍來自原稿；拿切掉的邊去跟整張原稿
+    比均值，等於把「少了一條邊」判成偏色。週期化疊在改尺寸之後的色偏，
+    由 `color_mean`／`color_low`／截斷閘門負責。
     """
-    if src.shape[2:] != out.shape[2:]:
+    if src.shape != out.shape:
         return 0.0
-    a = src.reshape(-1, src.shape[2]).mean(axis=0)
-    b = out.reshape(-1, out.shape[2]).mean(axis=0)
+    ch = src.shape[2] if src.ndim == 3 else 1
+    a = src.reshape(-1, ch).mean(axis=0).astype(np.float64)
+    b = out.reshape(-1, ch).mean(axis=0).astype(np.float64)
     return float(np.abs(a - b).max())
 
 

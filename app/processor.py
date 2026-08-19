@@ -1335,9 +1335,11 @@ def make_seamless_hard_cut(
     log：進度回呼（批次時印到命令列；不改變選圖／接縫判定）。
     """
     from app.discrete_lattice import try_make_discrete_seamless
+    from app.quality import tone_shift
     from app.seamless_core import recover_torus_crop
     from app.select import (
         SEAM_PERFECT,
+        TONE_MAX,
         Base,
         apply_recipe,
         choose,
@@ -1411,14 +1413,30 @@ def make_seamless_hard_cut(
             if not same:
                 bases.append(_crop_base(unit_d, f"點綴晶格（{detail_d}）"))
 
-    # 稀疏點綴才清邊補花：滿版花布清邊會把整張花網一起清掉
-    if margin_px > 0 and ratio < 0.16 and not discrete:
+    # 「去邊」只裁掉外圈（像素仍是原稿），讓新邊緣較少殘肢，再交給最小誤差切。
+    # 不限前景占比：滿版花布也只是少一圈邊，不是清掉花網。
+    # 清邊補花會改色，同尺寸時色調閘門看得到；偏色超過門檻就不要進選單。
+    if margin_px > 0:
+        insets = [(1, "去邊"), (2, "去寬邊")]
+        if ratio < 0.20:
+            insets.append((3, "去更寬邊"))
+        for mul, tag in insets:
+            m = margin_px * mul
+            ih = h - 2 * m
+            iw = w - 2 * m
+            if min(ih, iw) < 64:
+                continue
+            inset = arr[m : m + ih, m : m + iw]
+            bases.append(
+                Base(inset, tag, True, [("inset", (m, m, ih, iw))])
+            )
+    if margin_px > 0 and ratio < 0.34:
         filled = timed(
             "清邊補花",
             lambda: _clear_and_refill(arr, bg, threshold, margin_px),
             log,
         )
-        if filled is not None:
+        if filled is not None and tone_shift(arr, filled) <= TONE_MAX:
             bases.append(Base(filled, "清邊補花", False, None))
 
     best = choose(src, bases, log=log)

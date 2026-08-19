@@ -172,3 +172,96 @@ def hex_to_rgb(value: str) -> tuple[int, int, int]:
     if len(text) != 6:
         raise ValueError(f"無效的色碼: {value}")
     return int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16)
+
+
+# kuotu 成品框：外黑內白。300dpi 時約黑 9–12px、白 20–24px；允許各 DPI。
+_BORDER_BLACK_LUM = 28.0
+_BORDER_WHITE_LUM = 227.0
+_BORDER_UNIFORM = 0.90
+_BORDER_MAX_SCAN = 80
+_BORDER_MIN_BLACK = 2
+_BORDER_MAX_BLACK = 64
+_BORDER_MIN_WHITE = 2
+_BORDER_MAX_WHITE = 96
+_BORDER_TRANS = 2
+_BORDER_WIDTH_TOL = 0.40
+_BORDER_WIDTH_ABS = 4
+
+
+def _luminance(rgb: np.ndarray) -> np.ndarray:
+    a = rgb.astype(np.float32)
+    return 0.299 * a[..., 0] + 0.587 * a[..., 1] + 0.114 * a[..., 2]
+
+
+def _frame_run(line_black: np.ndarray, line_white: np.ndarray) -> tuple[int, int]:
+    """從外緣量連續近黑帶寬，再量緊接的近白帶寬。中間允許 1–2px 過渡。"""
+    n = int(line_black.size)
+    i = 0
+    while i < n and line_black[i]:
+        i += 1
+    black = i
+    trans = 0
+    while i < n and not line_black[i] and not line_white[i] and trans < _BORDER_TRANS:
+        i += 1
+        trans += 1
+    white0 = i
+    while i < n and line_white[i]:
+        i += 1
+    white = i - white0
+    return black, white
+
+
+def has_finished_border(image: Image.Image) -> bool:
+    """
+    是否為 kuotu 加過的成品框：四邊外圈近黑、內圈近白，且寬度大致均勻。
+
+    黑底印花不會過這關——沒有一圈均勻白邊，黑區也不會是四邊同寬的細框。
+    """
+    w, h = image.size
+    if min(h, w) < 64:
+        return False
+    scan = min(_BORDER_MAX_SCAN, h // 8, w // 8)
+    if scan < _BORDER_MIN_BLACK + _BORDER_MIN_WHITE:
+        return False
+
+    top = analysis_rgb(image.crop((0, 0, w, scan)))
+    bot = analysis_rgb(image.crop((0, h - scan, w, h)))
+    left = analysis_rgb(image.crop((0, 0, scan, h)))
+    right = analysis_rgb(image.crop((w - scan, 0, w, h)))
+
+    def bw(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        lum = _luminance(arr)
+        return lum <= _BORDER_BLACK_LUM, lum >= _BORDER_WHITE_LUM
+
+    tb, tw = bw(np.asarray(top, dtype=np.uint8))
+    bb, bwh = bw(np.asarray(bot, dtype=np.uint8))
+    lb, lw = bw(np.asarray(left, dtype=np.uint8))
+    rb, rw = bw(np.asarray(right, dtype=np.uint8))
+    pairs = (
+        (tb, tw),
+        (bb[::-1], bwh[::-1]),
+        (lb.transpose(1, 0), lw.transpose(1, 0)),
+        (rb[:, ::-1].transpose(1, 0), rw[:, ::-1].transpose(1, 0)),
+    )
+    widths: list[tuple[int, int]] = []
+    for b_strip, w_strip in pairs:
+        line_b = b_strip.mean(axis=1) >= _BORDER_UNIFORM
+        line_w = w_strip.mean(axis=1) >= _BORDER_UNIFORM
+        black, white = _frame_run(line_b, line_w)
+        if not (
+            _BORDER_MIN_BLACK <= black <= _BORDER_MAX_BLACK
+            and _BORDER_MIN_WHITE <= white <= _BORDER_MAX_WHITE
+        ):
+            return False
+        widths.append((black, white))
+
+    blacks = [b for b, _ in widths]
+    whites = [wh for _, wh in widths]
+    b_ref = float(np.median(blacks))
+    w_ref = float(np.median(whites))
+    for b, wh in widths:
+        if abs(b - b_ref) > max(_BORDER_WIDTH_ABS, b_ref * _BORDER_WIDTH_TOL):
+            return False
+        if abs(wh - w_ref) > max(_BORDER_WIDTH_ABS, w_ref * _BORDER_WIDTH_TOL):
+            return False
+    return True
