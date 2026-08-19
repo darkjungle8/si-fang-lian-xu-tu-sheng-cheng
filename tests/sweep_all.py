@@ -591,6 +591,16 @@ def main() -> int:
         help="只重跑該 report.json 裡 errors 非空的圖",
     )
     ap.add_argument(
+        "--pairs-from",
+        default="",
+        help="只跑該 JSON 裡的 {folder,name} 列表",
+    )
+    ap.add_argument(
+        "--merge-into",
+        default="",
+        help="把本次結果寫回這份 report.json 並重寫審查牆",
+    )
+    ap.add_argument(
         "--no-dedup",
         action="store_true",
         help="不去重，每條路徑都跑",
@@ -617,6 +627,14 @@ def main() -> int:
         }
         pairs = [p for p in pairs if p in wanted]
         print(f"依報告重跑失敗集 {len(pairs)} 張（報告 {args.failed_from}）")
+    if args.pairs_from:
+        listed = json.loads(Path(args.pairs_from).read_text(encoding="utf-8"))
+        wanted = {
+            (r.get("folder") or "", r.get("name") or "")
+            for r in listed
+        }
+        pairs = [p for p in pairs if p in wanted]
+        print(f"依名單重跑 {len(pairs)} 張（{args.pairs_from}）")
     if not pairs:
         print("沒有符合的圖")
         return 1
@@ -717,8 +735,49 @@ def main() -> int:
     for k, v in sorted(reasons.items(), key=lambda kv: -kv[1]):
         print(f"  {k}: {v}")
     print(f"報告 {report_path}")
+    index_rows = rows
+    if args.merge_into:
+        dest = Path(args.merge_into)
+        old = json.loads(dest.read_text(encoding="utf-8"))
+        by_key = {
+            (r.get("folder") or "", r.get("name") or ""): i
+            for i, r in enumerate(old)
+        }
+        updated = 0
+        for r in rows:
+            key = (r.get("folder") or "", r.get("name") or "")
+            if r.get("duplicate_of"):
+                continue
+            idx = by_key.get(key)
+            if idx is None:
+                old.append(r)
+                by_key[key] = len(old) - 1
+            else:
+                old[idx] = r
+            updated += 1
+            prim = f"{key[0]}/{key[1]}" if key[0] else key[1]
+            for i, other in enumerate(old):
+                if other.get("duplicate_of") == prim:
+                    copy = dict(r)
+                    copy["folder"] = other.get("folder")
+                    copy["name"] = other.get("name")
+                    copy["duplicate_of"] = prim
+                    old[i] = copy
+        dest.write_text(
+            json.dumps(
+                sorted(
+                    old,
+                    key=lambda r: (r.get("folder") or "", r.get("name") or ""),
+                ),
+                ensure_ascii=False,
+                indent=1,
+            ),
+            encoding="utf-8",
+        )
+        print(f"已寫回 {updated} 張到 {dest}")
+        index_rows = old
     if sheets:
-        print(f"索引 {write_index(rows)}")
+        print(f"索引 {write_index(index_rows)}")
     return 1 if n_fail else 0
 
 

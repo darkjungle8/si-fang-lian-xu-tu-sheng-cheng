@@ -238,6 +238,86 @@ def wrap_excess(arr: np.ndarray) -> float:
     return seam_report(arr).wrap_excess
 
 
+def _luminance(arr: np.ndarray) -> np.ndarray:
+    a = arr.astype(np.float32, copy=False)
+    if a.ndim == 2:
+        return a
+    return 0.299 * a[..., 0] + 0.587 * a[..., 1] + 0.114 * a[..., 2]
+
+
+def ink_mask(arr: np.ndarray, *, delta: float = 18.0) -> np.ndarray:
+    """相對畫面中位亮度的『有圖案』遮罩。不依賴背景色，深底淺花也能用。"""
+    lum = _luminance(arr)
+    return np.abs(lum - float(np.median(lum))) > delta
+
+
+def ink_frac(arr: np.ndarray) -> float:
+    return float(ink_mask(arr).mean())
+
+
+def edge_void_ratio(arr: np.ndarray, *, band_frac: float = 0.05) -> float:
+    """
+    邊緣帶相對內部少了多少圖案。
+
+    清邊補花若把四邊點綴清掉卻補不回密度，wrap 色差是 0（白接白），
+    2×2 正中央卻出現十字空洞。這是色差接縫量不到的。
+    """
+    ink = ink_mask(arr)
+    h, w = ink.shape
+    b = max(8, int(round(min(h, w) * band_frac)))
+    b = min(b, h // 4, w // 4)
+    edge = np.zeros((h, w), dtype=bool)
+    edge[:b, :] = True
+    edge[h - b :, :] = True
+    edge[:, :b] = True
+    edge[:, w - b :] = True
+    interior = ~edge
+    e = float(ink[edge].mean()) if edge.any() else 0.0
+    i = float(ink[interior].mean()) if interior.any() else 0.0
+    if i < 0.04:
+        return 0.0
+    return float(max(0.0, 1.0 - e / i))
+
+
+def _strip_diff(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    d = np.abs(a.astype(np.int16) - b.astype(np.int16))
+    return d.mean(axis=-1) if d.ndim == 3 else d
+
+
+def wrap_hotspot(arr: np.ndarray) -> float:
+    """
+    wrap 線上局部最熱的色差。
+
+    `wrap_excess` 是整條縫的平均超出量。狐狸頭、漿果被剖開時，九成接縫
+    是地色對地色（平均 ≈ 0），只有圖章那一段炸掉。用 90 分位減 50 分位
+    抓這種長尾；再跟內部相鄰線的 90 分位比，避免把繁忙紋理本身當成縫。
+    """
+    h, w = arr.shape[:2]
+    if h < 8 or w < 8:
+        return 0.0
+
+    def axis_hot(wrap: np.ndarray, interiors: list[np.ndarray]) -> float:
+        p90 = float(np.percentile(wrap, 90))
+        p50 = float(np.percentile(wrap, 50))
+        tail = max(0.0, p90 - p50)
+        base = float(np.median([np.percentile(s, 90) for s in interiors]))
+        vs_int = max(0.0, p90 - base)
+        return max(tail, vs_int)
+
+    interiors_v = [
+        _strip_diff(arr[:, x], arr[:, x + 1])
+        for x in (1, max(2, w // 4), w // 2, min(w - 2, 3 * w // 4))
+    ]
+    interiors_h = [
+        _strip_diff(arr[y], arr[y + 1])
+        for y in (1, max(2, h // 4), h // 2, min(h - 2, 3 * h // 4))
+    ]
+    return max(
+        axis_hot(_strip_diff(arr[:, 0], arr[:, -1]), interiors_v),
+        axis_hot(_strip_diff(arr[0], arr[-1]), interiors_h),
+    )
+
+
 @dataclass(frozen=True)
 class ColorShift:
     """兩張同尺寸圖之間的色偏。單位為 0–255 階。"""

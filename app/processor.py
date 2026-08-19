@@ -343,8 +343,10 @@ def refill_with_wrapped_motifs(
     max_overlap: float = 0.08,
 ) -> np.ndarray:
     """
-    在被清掉的位置用完整圖案環繞貼回；控制間距，避免接縫擠成一團。
-    放不下就不硬塞（寧願略疏，不要重疊堆疊）。
+    在被清掉的位置用完整圖案環繞貼回。
+
+    碰邊殘片的質心仍靠近邊緣，完整圖章貼上去會跨過邊界出現在對邊，
+    這才是四方連續。重疊檢查或把點往裡推，都會在 2×2 中央留十字空洞。
     """
     if not motifs:
         return arr
@@ -352,110 +354,10 @@ def refill_with_wrapped_motifs(
     out = arr.copy()
     h, w = out.shape[:2]
     rng = np.random.default_rng(seed)
-    occupied = _foreground_mask(out, bg, threshold)
+    del bg, threshold, max_overlap
 
-    # 只補被刪數量的一部分，並做空間稀疏化
-    placements: list[tuple[float, float, int]] = []
-    # 大面積先補，較能代表原密度
-    ordered = sorted(removed, key=lambda t: t[2], reverse=True)
-    large_cut = sum(1 for t in ordered if t[2] >= 4000)
-    if large_cut > 0:
-        # 動物等大圖章：被切掉的都補回（環繞貼），否則邊緣空洞
-        budget = len(ordered)
-    else:
-        # 最多補 removed 的 70%，且不超過素材數*2
-        budget = min(
-            len(ordered),
-            max(1, int(round(len(ordered) * 0.7))),
-            max(2, len(motifs) * 2),
-        )
-    for cy, cx, area in ordered[:budget]:
-        # 大圖章要留在邊緣才能環繞接上；小碎花仍避開四角擠堆
-        if area < 4000:
-            cy, cx = _nudge_off_corners(cy, cx, h, w)
-        placements.append((cy, cx, area))
-
-    # 邊緣若仍明顯偏空，少量補點（嚴格上限）
-    edge_wide = _edge_band_mask(h, w, max(8, min(h, w) // 8))
-    edge_fg = float(np.mean(occupied[edge_wide])) if np.any(edge_wide) else 0.0
-    interior = ~edge_wide
-    int_fg = float(np.mean(occupied[interior])) if np.any(interior) else 0.0
-    if int_fg > 0.02 and edge_fg < int_fg * 0.35:
-        need = min(3, max(0, int(round((int_fg * 0.5 - edge_fg) * np.count_nonzero(edge_wide) / max(motifs[0].area, 1)))))
-        band = max(8, min(h, w) // 7)
-        for _ in range(need):
-            side = int(rng.integers(0, 4))
-            if side == 0:
-                cy, cx = float(rng.uniform(band * 0.3, band)), float(rng.uniform(w * 0.2, w * 0.8))
-            elif side == 1:
-                cy, cx = float(rng.uniform(h - band, h - band * 0.3)), float(rng.uniform(w * 0.2, w * 0.8))
-            elif side == 2:
-                cy, cx = float(rng.uniform(h * 0.2, h * 0.8)), float(rng.uniform(band * 0.3, band))
-            else:
-                cy, cx = float(rng.uniform(h * 0.2, h * 0.8)), float(rng.uniform(w - band, w - band * 0.3))
-            cy, cx = _nudge_off_corners(cy, cx, h, w)
-            placements.append((cy, cx, motifs[0].area))
-
-    placed_centers: list[tuple[float, float, float]] = []  # cy, cx, min_radius
-
-    for cy, cx, area in placements:
-        motif = _pick_motif(motifs, area, rng)
-        radius = max(12.0, 0.9 * float(np.sqrt(motif.area / np.pi)) * 2.2)
-        overlap_lim = 0.14 if motif.area >= 4000 else max_overlap
-
-        # 與已放置朵保持環面距離
-        too_close = any(
-            _torus_distance(cy, cx, py, px, h, w) < max(radius, pr) * 0.85
-            for py, px, pr in placed_centers
-        )
-        if too_close:
-            # 嘗試抖動找空位
-            found = False
-            for _ in range(20):
-                ny = float((cy + rng.normal(0, radius * 0.6)) % h)
-                nx = float((cx + rng.normal(0, radius * 0.6)) % w)
-                if motif.area < 4000:
-                    ny, nx = _nudge_off_corners(ny, nx, h, w)
-                if any(
-                    _torus_distance(ny, nx, py, px, h, w) < max(radius, pr) * 0.85
-                    for py, px, pr in placed_centers
-                ):
-                    continue
-                if _overlap_ratio(out, motif, ny, nx, occupied) <= overlap_lim:
-                    cy, cx = ny, nx
-                    found = True
-                    break
-            if not found:
-                continue  # 放棄，不硬塞
-        else:
-            # 檢查重疊；不行就抖動，再不放
-            ok = _overlap_ratio(out, motif, cy, cx, occupied) <= overlap_lim
-            if not ok:
-                found = False
-                for _ in range(16):
-                    ny = float((cy + rng.normal(0, radius * 0.5)) % h)
-                    nx = float((cx + rng.normal(0, radius * 0.5)) % w)
-                    if motif.area < 4000:
-                        ny, nx = _nudge_off_corners(ny, nx, h, w)
-                    if any(
-                        _torus_distance(ny, nx, py, px, h, w) < max(radius, pr) * 0.85
-                        for py, px, pr in placed_centers
-                    ):
-                        continue
-                    if _overlap_ratio(out, motif, ny, nx, occupied) <= overlap_lim:
-                        cy, cx = ny, nx
-                        found = True
-                        break
-                if not found:
-                    continue
-
-        stamp_motif_wrapped(out, motif, cy, cx)
-        top = int(round(cy - motif.cy))
-        left = int(round(cx - motif.cx))
-        my, mx = np.where(motif.mask)
-        occupied[(top + my) % h, (left + mx) % w] = True
-        placed_centers.append((cy, cx, radius))
-
+    for cy, cx, area in sorted(removed, key=lambda t: t[2], reverse=True):
+        stamp_motif_wrapped(out, _pick_motif(motifs, area, rng), cy, cx)
     return out
 
 
@@ -569,18 +471,20 @@ def _compact_period_jobs(
                         if cw > max_w or ch > max_h:
                             continue
                         _add(px, py, cw, ch)
-    elif xs:
-        for px in xs:
-            for nx in (1, 2, 3):
-                cw = nx * px
-                if cw <= int(w * 0.90):
-                    _add(px, h, cw, h)
-    elif ys:
-        for py in ys:
-            for ny in (1, 2, 3):
-                ch = ny * py
-                if ch <= int(h * 0.90):
-                    _add(w, py, w, ch)
+    # 單軸條帶：部落紋／橫向幾何往往只有一軸是真週期，另一軸自相關是假峰。
+    # 舊邏輯在「兩軸都有峰」時只產生 2D 小單元，假峰那一軸的 repeat error
+    # 很高，裁出來 wrap 色差可以是 0、結構卻對不上；真週期那一軸反而沒被
+    # 單獨裁。即使另一軸也有峰，仍把較強的一軸做成 1～3 格滿幅條帶。
+    for px in xs:
+        for nx in (1, 2, 3):
+            cw = nx * px
+            if cw <= int(w * 0.90):
+                _add(px, max(ys[0] if ys else h // 4, 16), cw, h)
+    for py in ys:
+        for ny in (1, 2, 3):
+            ch = ny * py
+            if ch <= int(h * 0.90):
+                _add(max(xs[0] if xs else w // 4, 16), py, w, ch)
     # 去重、限制數量
     uniq: list[tuple[int, int, int, int]] = []
     seen: set[tuple[int, int, int, int]] = set()
@@ -1289,11 +1193,15 @@ def _compact_phase(
     stepy = max(2, py // 10)
     xs: list[int]
     ys: list[int]
-    if ch >= h:
-        ys = [h // 2]
+    # 滿幅那一軸仍要滾相位：條帶圖的左右縫常常只要水平移到對的位置就消失。
+    if ch >= h and cw >= w:
+        xs = list(range(0, w, max(8, w // 12)))
+        ys = list(range(0, h, max(8, h // 12)))
+    elif ch >= h:
+        ys = list(range(0, h, max(8, h // 12)))
         xs = list(range(0, max(px, 1), stepx))
     elif cw >= w:
-        xs = [w // 2]
+        xs = list(range(0, w, max(8, w // 12)))
         ys = list(range(0, max(py, 1), stepy))
     else:
         xs = list(range(0, max(px, 1), stepx))
@@ -1470,17 +1378,21 @@ def _clear_and_refill(
     margin_px: int,
 ) -> np.ndarray | None:
     """
-    清掉碰邊殘花，再用完整圖案環繞補回密度。
+    清掉真正碰到畫框的殘片，再用完整圖案環繞貼回。
 
-    只在稀疏點綴上有意義，而且成敗要看補完後畫面有沒有變空——清邊很容易
-    把邊上的花整朵刪掉卻補不回來。這裡只做「值不值得當候選」的粗篩，
-    真正的取捨交給 `app.select` 的閘門與成本。
+    碰邊只看最外幾像素。若用 3% 邊緣帶，靠近邊界的完整圖章會被整朵刪掉，
+    補在原位也不跨縫，2×2 正中央仍是十字空洞。
     """
-    motifs = extract_interior_motifs(arr, bg, threshold, margin_px)
+    from app.quality import edge_void_ratio
+
+    del margin_px
+
+    touch = max(2, min(8, min(arr.shape[0], arr.shape[1]) // 200))
+    motifs = extract_interior_motifs(arr, bg, threshold, touch)
     if len(motifs) < 2:
         return None
     cleaned, removed = remove_edge_touching_components(
-        arr, bg, threshold, margin_px
+        arr, bg, threshold, touch
     )
     if not removed:
         return None
@@ -1492,6 +1404,10 @@ def _clear_and_refill(
     before = foreground_ratio(arr, bg, threshold)
     after = foreground_ratio(filled, bg, threshold)
     if after < max(0.04, before * 0.55):
+        return None
+    src_void = edge_void_ratio(arr)
+    out_void = edge_void_ratio(filled)
+    if out_void > 0.22 and out_void > src_void + 0.12:
         return None
     return filled
 
@@ -1514,11 +1430,9 @@ def make_seamless_hard_cut(
     log：進度回呼（批次時印到命令列；不改變選圖／接縫判定）。
     """
     from app.discrete_lattice import try_make_discrete_seamless
-    from app.quality import tone_shift
     from app.seamless_core import recover_torus_crop
     from app.select import (
         SEAM_PERFECT,
-        TONE_MAX,
         Base,
         apply_recipe,
         choose,
@@ -1615,7 +1529,7 @@ def make_seamless_hard_cut(
             lambda: _clear_and_refill(arr, bg, threshold, margin_px),
             log,
         )
-        if filled is not None and tone_shift(arr, filled) <= TONE_MAX:
+        if filled is not None:
             bases.append(Base(filled, "清邊補花", False, None))
 
     best = choose(src, bases, log=log)
