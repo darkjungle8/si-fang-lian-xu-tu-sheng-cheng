@@ -42,6 +42,7 @@ from app.quality import (
     seam_report,
     tone_shift,
     wrap_hotspot,
+    wrap_hotspot_axes,
 )
 from app.seamless_core import (
     periodize,
@@ -99,7 +100,9 @@ MOTIF_CUT_MAX = 0.012
 MOTIF_CUT_DENSE = 0.12
 # 帶內圖案占比的放寬只適用於整張也是密花的情況。白底漿果帶內可以 62% 都
 # 是花，但畫面仍是稀疏圖章——剖開一顆就看得見。整張墨量不夠時維持 1%。
-MOTIF_CUT_DENSE_INK = 0.40
+# 0.40／0.25 把淡底水彩（ink 0.18–0.24）當成稀疏圖章，1.2% 切線就整張
+# 出局。0.15 仍擋得住單顆圖章（ink 通常 < 0.10）；實測香檳玉蘭 0.18。
+MOTIF_CUT_DENSE_INK = 0.15
 
 # wrap 平均為 0 時，局部 90 分位仍可能很高（圖章被剖、幾何條帶錯相位）。
 # 校準：已接上的週期裁切鴨子約 12，狐狸／部落紋／玫瑰 22–55。
@@ -109,6 +112,21 @@ CUT_ERR_OK = 18.0
 # 真無縫單元即使邊緣略疏也通常 < 0.22。還要跟原稿比，避免誤殺本身就疏邊的圖。
 VOID_MAX = 0.22
 VOID_DELTA = 0.12
+
+# 單元最短邊至少為原稿短邊的 22%。1024 原稿約 225px。
+# 0.25 會誤殺 255×384 這種合理直條；0.22 仍擋住把織紋／細條週期當成花布
+# 單元的裁切（實測 184×1024、122×558、156×168、104×112）。
+MIN_UNIT_EDGE_FRAC = 0.22
+# compact 搜尋另加 64px 地板，避免測試小圖依 22% 產出十幾像素的碎片。
+COMPACT_ABS_MIN = 64
+
+
+def min_unit_edge(h: int, w: int) -> int:
+    return max(8, int(round(MIN_UNIT_EDGE_FRAC * min(int(h), int(w)))))
+
+
+def compact_min_edge(h: int, w: int) -> int:
+    return max(COMPACT_ABS_MIN, min_unit_edge(h, w))
 
 # 這裡沒有幾何門檻是刻意的。它原本是為了擋錯切對齊把拼布格扳斜，但錯切
 # 機制已經整個移除，現存的算子全是像素搬移或逐通道平移，不可能扳斜。留著
@@ -211,6 +229,8 @@ class SourceFacts:
     """
     ink: float = 0.0
     edge_void: float = 0.0
+    hotspot: float = 0.0
+    """原稿 wrap 線局部熱點。平均超出量為 0 時仍可能剖開圖章。"""
 
     @property
     def internal_allow(self) -> float:
@@ -246,6 +266,11 @@ def measure(src: SourceFacts, cand: Candidate) -> Candidate:
     if tone > TONE_MAX and not (not cand.lossless and cand.recipe is None):
         errs.append(f"色調偏移:{tone:.1f}")
     has_crop = bool(cand.recipe) and any(k == "crop" for k, _ in cand.recipe)
+    # 清邊補花 recipe 是 None，後接最小誤差切時 _r() 仍是 None；不能只看 recipe。
+    has_mincut = (
+        (bool(cand.recipe) and any(k == "mincut" for k, _ in cand.recipe))
+        or ("最小誤差切" in cand.label)
+    )
     if derr > (DESIGN_MAX_CROP if has_crop else DESIGN_MAX):
         errs.append(f"設計被改壞:{derr:.0f}")
     if src.ink >= MOTIF_CUT_DENSE_INK:
@@ -257,9 +282,10 @@ def measure(src: SourceFacts, cand: Candidate) -> Candidate:
     hot = wrap_hotspot(cand.arr)
     cand.hotspot = hot
     cand.derr = derr
-    # 真週期裁切平鋪回去對得上時，wrap 線本來就是圖案自身的邊緣分佈，
-    # 90 分位熱點會偏高，不能當成結構縫。
-    if (not has_crop) and hot > HOTSPOT_OK:
+    # 真週期裁切／最小誤差切之後，wrap 線本來就是圖案自身的邊緣分佈，
+    # 90 分位熱點會偏高，不能當成結構縫。殘縫改看 wrap_excess、切線色差、
+    # 殘肢比例。
+    if (not has_crop) and (not has_mincut) and hot > HOTSPOT_OK:
         errs.append(f"結構接縫:{hot:.0f}")
     if cand.cut_err > CUT_ERR_OK:
         errs.append(f"切線色差:{cand.cut_err:.0f}")
@@ -268,6 +294,10 @@ def measure(src: SourceFacts, cand: Candidate) -> Candidate:
         errs.append(f"邊緣掏空:{void:.0%}")
     if src.needs_native and cand.recipe is None:
         errs.append("無法保色")
+    uh, uw = cand.arr.shape[:2]
+    need = min_unit_edge(*src.arr.shape[:2])
+    if min(uh, uw) < need:
+        errs.append(f"單元過小:{min(uh, uw)}<{need}")
 
     cand.errors = errs
     cand.cost = (
@@ -314,13 +344,16 @@ def make_seamless_variants(
 
     out: list[Candidate] = [Candidate(base, label, lossless, recipe)]
     rep = seam_report(base)
+    hot_v, hot_h = wrap_hotspot_axes(base)
     # 用嚴格門檻決定要不要展開加工版本，寬鬆門檻只用來判定「絕對不行」。
     # 灰帶案例也要把完整選單擺出來，才輪得到成本函數權衡。
-    if rep.wrap_excess <= SEAM_PERFECT:
+    if source_looks_seamless(rep, max(hot_v, hot_h)):
         return out
 
-    do_v = rep.excess_v > AXIS_CUT_MIN
-    do_h = rep.excess_h > AXIS_CUT_MIN
+    # wrap 平均可以是 0（地色接地色），圖章仍對不上。那種軸也必須下刀，
+    # 否則只會對「去邊之後才出現平均縫」的 inset 切，邊緣被掏成十字空洞。
+    do_v = rep.excess_v > AXIS_CUT_MIN or hot_v > HOTSPOT_OK
+    do_h = rep.excess_h > AXIS_CUT_MIN or hot_h > HOTSPOT_OK
     if do_v or do_h:
         cut, mi = wrap_mincut(base, do_v=do_v, do_h=do_h)
         dup = mi.dup_v * mi.band_v / max(base.shape[1], 1) + (
@@ -444,6 +477,7 @@ def make_seamless_variants(
                 _add_mincut(ch, mh, tag)
 
         # 把縫移到較空的相位再切：稀疏圖章被釘在預設邊緣時，平移後切線才繞得開。
+        # 細線幾何在 42% 帶仍會剖到 2%，50% 帶才繞得過（石墨冰裂 1.1%）。
         if struct_fail and recipe is not None:
             h0, w0 = base.shape[:2]
             for oy, ox, tag in (
@@ -451,24 +485,25 @@ def make_seamless_variants(
                 (h0 // 4, 0, "平移V"),
             ):
                 rolled = np.roll(np.roll(base, -oy, 0), -ox, 1)
-                cut_r, mi_r = wrap_mincut(
-                    rolled, do_v=do_v, do_h=do_h, max_band_frac=0.42
-                )
-                dup_r = mi_r.dup_v * mi_r.band_v / max(rolled.shape[1], 1) + (
-                    mi_r.dup_h * mi_r.band_h / max(rolled.shape[0], 1)
-                )
-                out.append(
-                    Candidate(
-                        cut_r,
-                        f"{label}＋{tag}＋{mi_r.describe()}",
-                        lossless,
-                        _r(("roll", (oy, ox)), ("mincut", mi_r)),
-                        dup=dup_r,
-                        motif_cut=mi_r.motif_cut,
-                        motif_dense=mi_r.motif_dense,
-                        cut_err=max(mi_r.err_v, mi_r.err_h),
+                for frac, suffix in ((0.42, ""), (0.50, "更寬帶")):
+                    cut_r, mi_r = wrap_mincut(
+                        rolled, do_v=do_v, do_h=do_h, max_band_frac=frac
                     )
-                )
+                    dup_r = mi_r.dup_v * mi_r.band_v / max(rolled.shape[1], 1) + (
+                        mi_r.dup_h * mi_r.band_h / max(rolled.shape[0], 1)
+                    )
+                    out.append(
+                        Candidate(
+                            cut_r,
+                            f"{label}＋{tag}{suffix}＋{mi_r.describe()}",
+                            lossless,
+                            _r(("roll", (oy, ox)), ("mincut", mi_r)),
+                            dup=dup_r,
+                            motif_cut=mi_r.motif_cut,
+                            motif_dense=mi_r.motif_dense,
+                            cut_err=max(mi_r.err_v, mi_r.err_h),
+                        )
+                    )
 
     # 縫純粹來自整體光照／色溫落差時，不必動結構
     per0, pi0 = periodize(base)
@@ -579,6 +614,12 @@ def choose(
         if c.clipped > CLIP_MAX:
             color_pen += 80.0
         derr_pen = 80.0 if c.derr > DESIGN_MAX else 0.0
+        void_pen = (
+            80.0 if any(e.startswith("邊緣掏空") for e in c.errors) else 0.0
+        )
+        size_pen = (
+            80.0 if any(e.startswith("單元過小") for e in c.errors) else 0.0
+        )
         return (
             wrap
             + c.hotspot * 0.5
@@ -586,7 +627,9 @@ def choose(
             + internal_pen
             + motif_pen
             + color_pen
-            + derr_pen,
+            + derr_pen
+            + void_pen
+            + size_pen,
             c.cost,
         )
 
@@ -597,6 +640,11 @@ def choose(
     return best
 
 
+def source_looks_seamless(rep: SeamReport, hotspot: float) -> bool:
+    """平均超出量為 0 仍可能在 2×2 剖開圖章；必須連 hotspot 一起過關。"""
+    return rep.wrap_excess <= SEAM_PERFECT and hotspot <= HOTSPOT_OK
+
+
 def source_facts(arr: np.ndarray, *, needs_native: bool = False) -> SourceFacts:
     return SourceFacts(
         arr=arr,
@@ -605,6 +653,7 @@ def source_facts(arr: np.ndarray, *, needs_native: bool = False) -> SourceFacts:
         needs_native=needs_native,
         ink=ink_frac(arr),
         edge_void=edge_void_ratio(arr),
+        hotspot=wrap_hotspot(arr),
     )
 
 

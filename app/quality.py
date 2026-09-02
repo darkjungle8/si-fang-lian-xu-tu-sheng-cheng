@@ -284,9 +284,9 @@ def _strip_diff(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return d.mean(axis=-1) if d.ndim == 3 else d
 
 
-def wrap_hotspot(arr: np.ndarray) -> float:
+def wrap_hotspot_axes(arr: np.ndarray) -> tuple[float, float]:
     """
-    wrap 線上局部最熱的色差。
+    wrap 線上局部最熱的色差，回傳 (左右縫, 上下縫)。
 
     `wrap_excess` 是整條縫的平均超出量。狐狸頭、漿果被剖開時，九成接縫
     是地色對地色（平均 ≈ 0），只有圖章那一段炸掉。用 90 分位減 50 分位
@@ -294,7 +294,7 @@ def wrap_hotspot(arr: np.ndarray) -> float:
     """
     h, w = arr.shape[:2]
     if h < 8 or w < 8:
-        return 0.0
+        return 0.0, 0.0
 
     def axis_hot(wrap: np.ndarray, interiors: list[np.ndarray]) -> float:
         p90 = float(np.percentile(wrap, 90))
@@ -312,10 +312,16 @@ def wrap_hotspot(arr: np.ndarray) -> float:
         _strip_diff(arr[y], arr[y + 1])
         for y in (1, max(2, h // 4), h // 2, min(h - 2, 3 * h // 4))
     ]
-    return max(
+    return (
         axis_hot(_strip_diff(arr[:, 0], arr[:, -1]), interiors_v),
         axis_hot(_strip_diff(arr[0], arr[-1]), interiors_h),
     )
+
+
+def wrap_hotspot(arr: np.ndarray) -> float:
+    """兩軸 wrap 熱點的較大者。"""
+    hot_v, hot_h = wrap_hotspot_axes(arr)
+    return max(hot_v, hot_h)
 
 
 @dataclass(frozen=True)

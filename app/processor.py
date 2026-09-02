@@ -67,6 +67,17 @@ def _foreground_mask(arr: np.ndarray, bg: Sequence[int], threshold: float) -> np
     return color_distance(arr, bg) > threshold
 
 
+def _join_foreground(arr: np.ndarray, bg: Sequence[int], threshold: float) -> np.ndarray:
+    """
+    連通域用的前景。細線雪花／冰裂若走 4 連通，一條 1px 斜線會碎成上百塊，
+    碰邊只刪掉貼框的殘片、內部的臂還留在邊緣——清邊補花疊上去 wrap 熱點
+    照樣爆。先 3×3 閉合再 8 連通，把髮絲缺口接回同一朵。
+    """
+    fg = _foreground_mask(arr, bg, threshold).astype(np.uint8)
+    ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    return cv2.morphologyEx(fg, cv2.MORPH_CLOSE, ker)
+
+
 def _edge_band_mask(h: int, w: int, margin_px: int) -> np.ndarray:
     mx = max(0, min(margin_px, w // 2))
     my = max(0, min(margin_px, h // 2))
@@ -186,11 +197,9 @@ def extract_interior_motifs(
     碰邊與否用 `labels[edge]` 一次查完，取 mask 只在各自的外接矩形內做。
     逐個圖案跑 `labels == i` 是全圖掃描，圖案上萬個時就是上千億次運算。
     """
-    fg = _foreground_mask(arr, bg, threshold)
+    fg = _join_foreground(arr, bg, threshold)
     edge = _edge_band_mask(*arr.shape[:2], margin_px)
-    n, labels, stats, _ = cv2.connectedComponentsWithStats(
-        fg.astype(np.uint8), connectivity=4
-    )
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(fg, connectivity=8)
     interior = np.ones(n, dtype=bool)
     interior[0] = False
     touching = np.unique(labels[edge])
@@ -225,24 +234,28 @@ def remove_edge_touching_components(
     if margin_px <= 0:
         return out, removed
 
-    fg = _foreground_mask(out, bg, threshold)
+    fg = _join_foreground(out, bg, threshold)
     edge = _edge_band_mask(h, w, margin_px)
     bg_rgb = np.array(bg, dtype=np.uint8)
     n, labels, stats, centroids = cv2.connectedComponentsWithStats(
-        fg.astype(np.uint8), connectivity=4
+        fg, connectivity=8
     )
     touching = np.unique(labels[edge])
     touching = touching[(touching > 0) & (touching < n)]
     if touching.size == 0:
         return out, removed
 
+    min_area = 40
     for i in touching:
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < min_area:
+            continue
         # OpenCV centroid 是 (x, y)
         removed.append(
             (
                 float(centroids[i][1]),
                 float(centroids[i][0]),
-                int(stats[i, cv2.CC_STAT_AREA]),
+                area,
             )
         )
     # 一次做完：膨脹對聯集與逐塊分別做的結果相同，但省掉上萬次全圖掃描
@@ -346,18 +359,50 @@ def refill_with_wrapped_motifs(
     在被清掉的位置用完整圖案環繞貼回。
 
     碰邊殘片的質心仍靠近邊緣，完整圖章貼上去會跨過邊界出現在對邊，
-    這才是四方連續。重疊檢查或把點往裡推，都會在 2×2 中央留十字空洞。
+    這才是四方連續。但不能無上限疊貼：細線幾何一朵雪花碎成幾十個殘片
+    質心，每點都蓋一朵完整的，wrap 線上兩朵撞在一起，熱點比原稿還高。
+
+    先用環面重疊門檻貼，邊緣密度夠了就停；仍太疏（會在 2×2 中央留十字
+    空洞）才逐步放寬。大圖章（恐龍等）通常一貼就補滿，走第一道就能過。
     """
+    from app.quality import edge_void_ratio
+
     if not motifs:
         return arr
 
     out = arr.copy()
     h, w = out.shape[:2]
     rng = np.random.default_rng(seed)
-    del bg, threshold, max_overlap
+    occupied = _foreground_mask(out, bg, threshold).copy()
+    jobs = [
+        (cy, cx, _pick_motif(motifs, area, rng))
+        for cy, cx, area in sorted(removed, key=lambda t: t[2], reverse=True)
+    ]
+    # 第一個值即呼叫端的 max_overlap；後面幾檔只在邊緣仍空洞時才用
+    caps = (max_overlap, 0.12, 0.18, 0.35, 1.01)
 
-    for cy, cx, area in sorted(removed, key=lambda t: t[2], reverse=True):
-        stamp_motif_wrapped(out, _pick_motif(motifs, area, rng), cy, cx)
+    def _apply(motif: MotifStamp, cy: float, cx: float) -> None:
+        nonlocal occupied
+        stamp_motif_wrapped(out, motif, cy, cx)
+        my, mx = np.where(motif.mask)
+        if len(my) == 0:
+            return
+        top = int(round(cy - motif.cy))
+        left = int(round(cx - motif.cx))
+        occupied[(top + my) % h, (left + mx) % w] = True
+
+    pending = jobs
+    for cap in caps:
+        still: list[tuple[float, float, MotifStamp]] = []
+        for cy, cx, motif in pending:
+            if _overlap_ratio(out, motif, cy, cx, occupied) > cap:
+                still.append((cy, cx, motif))
+                continue
+            _apply(motif, cy, cx)
+        pending = still
+        void = edge_void_ratio(out)
+        if void <= 0.22 or not pending:
+            break
     return out
 
 
@@ -458,7 +503,10 @@ def _compact_period_jobs(
     max_h = int(h * 0.72)
 
     def _add(px: int, py: int, cw: int, ch: int) -> None:
-        if cw < 64 or ch < 64 or cw > w or ch > h:
+        from app.select import compact_min_edge
+
+        need = compact_min_edge(h, w)
+        if cw < need or ch < need or cw > w or ch > h:
             return
         jobs.append((px, py, cw, ch))
 
@@ -1127,8 +1175,11 @@ def try_period_crop(
     compact = _pick_compact_period_tile(arr, phase_sm, phase_scale)
     if compact is not None:
         tile, detail, wrap_ex, derr = compact
-        take = best_tile is None
-        if not take:
+        from app.select import min_unit_edge as _min_unit_edge
+
+        too_small = min(tile.shape[:2]) < _min_unit_edge(h, w)
+        take = (best_tile is None) and (not too_small)
+        if not take and not too_small:
             from app.quality import seam_report as _seam_report
 
             old_wrap = _seam_report(best_tile).wrap_excess
@@ -1159,7 +1210,12 @@ def _pick_compact_period_tile(
     src_rep = seam_report(arr)
     allow = max(src_rep.internal_excess, 6.0) * 1.15 + 2.0
     best: tuple[tuple[float, float], np.ndarray, str, float, float] | None = None
+    from app.select import compact_min_edge
+
+    need = compact_min_edge(h, w)
     for px, py, cw, ch in jobs:
+        if min(cw, ch) < need:
+            continue
         tile, off = _compact_phase(arr, cw, ch, px, py)
         rep = seam_report(tile)
         if rep.wrap_excess > 5.0:
@@ -1381,13 +1437,15 @@ def _clear_and_refill(
     清掉真正碰到畫框的殘片，再用完整圖案環繞貼回。
 
     碰邊只看最外幾像素。若用 3% 邊緣帶，靠近邊界的完整圖章會被整朵刪掉，
-    補在原位也不跨縫，2×2 正中央仍是十字空洞。
+    補在原位也不跨縫，2×2 正中央仍是十字空洞。細線幾何則相反：5px 太窄，
+    差 6～12px 的完整臂沒被清掉，補花一疊 wrap 熱點比原稿更高。約 1.2%
+    （上限 16px）抓住被框切到的荊棘／冰裂，又遠小於會誤刪完整圖章的 3%。
     """
     from app.quality import edge_void_ratio
 
     del margin_px
 
-    touch = max(2, min(8, min(arr.shape[0], arr.shape[1]) // 200))
+    touch = max(4, min(16, min(arr.shape[0], arr.shape[1]) // 80))
     motifs = extract_interior_motifs(arr, bg, threshold, touch)
     if len(motifs) < 2:
         return None
@@ -1432,11 +1490,11 @@ def make_seamless_hard_cut(
     from app.discrete_lattice import try_make_discrete_seamless
     from app.seamless_core import recover_torus_crop
     from app.select import (
-        SEAM_PERFECT,
         Base,
         apply_recipe,
         choose,
         source_facts,
+        source_looks_seamless,
         timed,
     )
 
@@ -1469,11 +1527,11 @@ def make_seamless_hard_cut(
     # 原稿已經夠好時直接採用：它的成本天生最低，不可能被贏過。門檻刻意
     # 訂得比「可見」還嚴，灰帶要進候選競賽讓成本函數權衡，別讓 4.0 那種
     # 平坦大色塊上看得見的小台階從這裡溜走。
-    if src.rep.wrap_excess <= SEAM_PERFECT:
+    if source_looks_seamless(src.rep, src.hotspot):
         _lg("  → 原稿已無縫，直接採用")
         return (
             _unit_image(native, ctx),
-            f"前景 {ratio:.0%}｜原稿已無縫（接縫超出 {src.rep.wrap_excess:.1f}）",
+            f"前景 {ratio:.0%}｜原稿已無縫（接縫超出 {src.rep.wrap_excess:.1f}，熱點 {src.hotspot:.1f}）",
         )
 
     def _crop_base(cropped: np.ndarray, label: str) -> Base:
