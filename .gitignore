@@ -19,6 +19,7 @@ tests/_out/
 tests/_review*/
 tests/_prod_audit*/
 tests/sweep_out/
+tests/sweep_out_corpus/
 output/
 pipeline_out/
 *.zip

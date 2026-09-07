@@ -91,6 +91,155 @@ def _edge_band_mask(h: int, w: int, margin_px: int) -> np.ndarray:
     return edge
 
 
+def _distance_p90(fg: np.ndarray) -> float:
+    dist = cv2.distanceTransform(fg.astype(np.uint8), cv2.DIST_L2, 5)
+    on = dist[fg.astype(bool)]
+    if on.size == 0:
+        return 0.0
+    return float(np.percentile(on, 90))
+
+
+def _overlay_stamp_mask(
+    arr: np.ndarray,
+    bg: Sequence[int],
+    threshold: float,
+) -> np.ndarray | None:
+    """
+    格紋／滿版底紋上的點綴（蜜蜂疊在灰格上）用色度拆出來。
+
+    一般前景對地色在這種圖會把整張格紋當墨，清邊補花刪掉 90% 畫面。
+    灰底色度低、點綴（黃蜜蜂）色度高，兩者差一個數量級才採信。
+    """
+    fg = _foreground_mask(arr, bg, threshold)
+    if float(np.mean(fg)) < 0.50:
+        return None
+    rgb = arr.astype(np.float32)
+    chroma = rgb.max(axis=2) - rgb.min(axis=2)
+    seed = chroma > 40.0
+    frac = float(np.mean(seed))
+    if frac < 0.004 or frac > 0.25:
+        return None
+    if float(chroma[~seed].mean()) > 12.0:
+        return None
+    seed_u8 = seed.astype(np.uint8)
+    ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    dil = cv2.dilate(seed_u8, ker)
+    med = cv2.medianBlur(arr, 21)
+    resid = (
+        np.abs(arr.astype(np.int16) - med.astype(np.int16)).mean(axis=2) > 22
+    )
+    overlay = (dil.astype(bool) & resid).astype(np.uint8)
+    ker3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    overlay = cv2.morphologyEx(overlay, cv2.MORPH_CLOSE, ker3)
+    n, _, stats, _ = cv2.connectedComponentsWithStats(overlay, connectivity=8)
+    mid = 0
+    cap = overlay.size * 0.05
+    for i in range(1, n):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if 80 <= area <= cap:
+            mid += 1
+    if mid < 8:
+        return None
+    return overlay
+
+
+def stamp_structure_view(
+    arr: np.ndarray,
+    bg: Sequence[int] | None = None,
+    threshold: float = 40.0,
+) -> np.ndarray:
+    """
+    格紋點綴：結構閘門只看點綴圖章，不看底紋相位。
+
+    蜜蜂疊在灰格上時，wrap 熱點／切圖都被格紋差幾像素的週期誤差主導，
+    即使蜜蜂已經跨縫貼完整。把點綴單獨放在平坦底上再量。
+    """
+    if bg is None:
+        med = np.median(arr.reshape(-1, arr.shape[-1]), axis=0)
+        bg = tuple(int(x) for x in med)
+    ov = _overlay_stamp_mask(arr, bg, threshold)
+    if ov is None:
+        return arr
+    out = np.empty_like(arr)
+    out[...] = np.array(bg, dtype=np.uint8)
+    m = ov.astype(bool)
+    out[m] = arr[m]
+    return out
+
+
+def _count_big_components(mask: np.ndarray, min_area: int = 200) -> int:
+    n, _, st, _ = cv2.connectedComponentsWithStats(
+        mask.astype(np.uint8), connectivity=8
+    )
+    if n <= 1:
+        return 0
+    return int(np.sum(st[1:, cv2.CC_STAT_AREA] >= min_area))
+
+
+def _split_touching_stamps(fg: np.ndarray) -> np.ndarray:
+    """
+    葉脈／細莖把多朵花黏成一塊時，用開運算拆開。
+
+    只在距離場中等（約 7–50px）且拆完中等連通域明顯變多時才用。
+    實心動物（刺蝟 p90≈90）與細線雪花（p90<6）都跳過。
+    """
+    p90 = _distance_p90(fg)
+    if not (7.0 <= p90 <= 50.0):
+        return fg
+    src = fg.astype(np.uint8)
+    big0 = _count_big_components(src)
+    if big0 < 4:
+        return src
+    best = src
+    best_big = big0
+    for k in (3, 5, 7):
+        ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+        op = cv2.morphologyEx(src, cv2.MORPH_OPEN, ker)
+        big = _count_big_components(op)
+        if big > best_big:
+            best, best_big = op, big
+    if best_big >= big0 + max(4, int(round(big0 * 0.12))):
+        return best
+    return src
+
+
+def _stamp_foreground(
+    arr: np.ndarray,
+    bg: Sequence[int],
+    threshold: float,
+) -> np.ndarray:
+    """
+    清邊補花用的圖章 mask。
+
+    細線雪花要 3×3 閉合才不會碎臂；實心動物閉合會把鼻尖黏上下一隻。
+    距離場厚的當實心，改用未閉合前景。格紋點綴走色度殘差。
+    散花葉脈黏連時用開運算拆成單朵，才能只清碰框的那一截。
+    """
+    overlay = _overlay_stamp_mask(arr, bg, threshold)
+    if overlay is not None:
+        return overlay
+    joined = _join_foreground(arr, bg, threshold)
+    if _distance_p90(joined) >= 8.0:
+        fg = _foreground_mask(arr, bg, threshold).astype(np.uint8)
+    else:
+        fg = joined
+    return _split_touching_stamps(fg)
+
+
+def _touch_margin_px(fg: np.ndarray) -> int:
+    """
+    實心圖章只清真正碰到畫框的殘片（2px）。
+
+    舊的 1.2% 帶會把腳剛擦到邊的完整刺蝟整隻刪掉，質心又在畫面裡，
+    補回去不跨縫，2×2 正中央仍是半截。細線幾何仍用較寬的帶抓住差
+    6～12px 的臂。
+    """
+    h, w = fg.shape[:2]
+    if _distance_p90(fg) < 6.0:
+        return max(4, min(16, min(h, w) // 80))
+    return 2
+
+
 @dataclass
 class MotifStamp:
     """一塊完整前景圖案（含外接矩形 patch 與 mask）。"""
@@ -152,6 +301,119 @@ def _component_to_stamp_from_roi(
     )
 
 
+def _hero_typical_area(motifs: list[MotifStamp]) -> float:
+    """主圖章面積。碎點很多時改看較大那一檔，避免中位數落在雪點上。"""
+    areas = np.array([m.area for m in motifs], dtype=np.float64)
+    if areas.size == 0:
+        return 40.0
+    med = float(np.median(areas))
+    p90 = float(np.percentile(areas, 90))
+    if p90 > med * 6.0:
+        upper = areas[areas >= p90 * 0.45]
+        return float(np.median(upper if upper.size else areas))
+    cut = float(np.percentile(areas, 70))
+    big = areas[areas >= cut]
+    return float(np.median(big if big.size else areas))
+
+
+def _complete_templates(motifs: list[MotifStamp]) -> list[MotifStamp]:
+    """丟掉黏成一坨的超大塊、以及相對同伴明顯殘缺的模板。"""
+    if len(motifs) < 2:
+        return motifs
+    from app.quality import _component_solidity
+
+    hero = _hero_typical_area(motifs)
+    recs: list[tuple[MotifStamp, float | None, int]] = []
+    for m in motifs:
+        if m.area > hero * 5.0:
+            continue
+        recs.append((m, _component_solidity(m.mask), m.area))
+    if len(recs) < 2:
+        return [m for m in motifs if m.area <= hero * 5.0] or motifs
+    areas = np.array([a for _, _, a in recs], dtype=np.float64)
+    sols = [s for _, s, _ in recs]
+    kept: list[MotifStamp] = []
+    for m, s, area in recs:
+        if s is None:
+            kept.append(m)
+            continue
+        peer = (areas >= area / 1.55) & (areas <= area * 1.55)
+        peer_s = [sols[j] for j in range(len(recs)) if peer[j] and sols[j] is not None]
+        if len(peer_s) < 4:
+            kept.append(m)
+            continue
+        med_s = float(np.median(peer_s))
+        if s < med_s - 0.10 and s < 0.78:
+            continue
+        kept.append(m)
+    if len(kept) >= 2:
+        return kept
+    return [m for m, _, _ in recs]
+
+
+def _snap_wrap_placement(
+    cy: float,
+    cx: float,
+    area: int,
+    motif: MotifStamp,
+    h: int,
+    w: int,
+    *,
+    forced_edge: bool = False,
+) -> tuple[float, float, bool]:
+    """
+    半截殘片把完整圖章的中心吸到 wrap 線上，貼上去才會跨縫出現在對邊。
+    內部殘缺維持原質心。回傳 (cy, cx, 是否邊緣件)。
+
+    碰框刪除的件（forced_edge）質心常落在畫面裡（半隻蜜蜂／雪人往內
+    縮），帶寬不夠就不會跨縫。這種一律吸到最近的 wrap。
+    """
+    mh, mw = motif.mask.shape[:2]
+    is_edge = False
+    if forced_edge or area < motif.area * 0.92:
+        span = max(mw, mh)
+        band = min(
+            span * (0.90 if forced_edge else 0.55),
+            (0.40 if forced_edge else 0.18) * min(h, w),
+        )
+        if cx <= band:
+            cx = 0.0
+            is_edge = True
+        elif cx >= w - band:
+            cx = float(w)
+            is_edge = True
+        if cy <= band:
+            cy = 0.0
+            is_edge = True
+        elif cy >= h - band:
+            cy = float(h)
+            is_edge = True
+        if forced_edge and not is_edge:
+            d_left, d_right = float(cx), float(w) - float(cx)
+            d_top, d_bot = float(cy), float(h) - float(cy)
+            nearest = min(d_left, d_right, d_top, d_bot)
+            if nearest == d_left:
+                cx = 0.0
+            elif nearest == d_right:
+                cx = float(w)
+            elif nearest == d_top:
+                cy = 0.0
+            else:
+                cy = float(h)
+            is_edge = True
+    else:
+        edge_px = max(8.0, 0.04 * min(h, w))
+        is_edge = (
+            cx <= edge_px
+            or cx >= w - edge_px
+            or cy <= edge_px
+            or cy >= h - edge_px
+        )
+        if not is_edge:
+            cy, cx = _nudge_off_corners(cy, cx, h, w)
+    return cy % h, cx % w, is_edge
+
+
 def _clear_edge_ruins_motifs(
     src: np.ndarray,
     filled: np.ndarray,
@@ -184,6 +446,90 @@ def _clear_edge_ruins_motifs(
     return False
 
 
+def _overlay_lattice_period(arr: np.ndarray, overlay: np.ndarray) -> tuple[int, int]:
+    """從非點綴像素估格紋週期。分數太低就當作沒有穩週期。"""
+    h, w = arr.shape[:2]
+    lum = arr.astype(np.float64).mean(axis=2)
+    masked = np.where(overlay.astype(bool), np.nan, lum)
+    sigx = np.nanmean(masked, axis=0)
+    sigy = np.nanmean(masked, axis=1)
+    mx = float(np.nanmean(sigx))
+    my = float(np.nanmean(sigy))
+    sigx = np.where(np.isnan(sigx), mx, sigx)
+    sigy = np.where(np.isnan(sigy), my, sigy)
+    xs = _autocorr_best_periods(sigx, 8, max(16, w // 3), top_k=1)
+    ys = _autocorr_best_periods(sigy, 8, max(16, h // 3), top_k=1)
+    if not xs or not ys or xs[0][1] < 0.20 or ys[0][1] < 0.20:
+        return 0, 0
+    px, py = int(xs[0][0]), int(ys[0][0])
+    if px < 8 or py < 8:
+        return 0, 0
+    return px, py
+
+
+def _fill_overlay_with_lattice(arr: np.ndarray, overlay: np.ndarray) -> np.ndarray:
+    """
+    把點綴全部換成格紋像素（優先從整數週期位移拷貝原稿）。
+
+    清邊補花只該搬蜜蜂，底紋要留下可拼接的格。median 塗洞會留下一坨
+    不在週期上的灰斑；從 ±k 個格子拷貝才是原稿像素。
+    """
+    out = arr.copy()
+    ov = overlay.astype(bool)
+    if not ov.any():
+        return out
+    px, py = _overlay_lattice_period(arr, overlay)
+    h, w = arr.shape[:2]
+    ys, xs = np.where(ov)
+    still = np.ones(ys.shape[0], dtype=bool)
+    if px >= 8 and py >= 8:
+        for k in (1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6, -6):
+            if not still.any():
+                break
+            yy = (ys + k * py) % h
+            xx = (xs + k * px) % w
+            ok = still & ~ov[yy, xx]
+            if not ok.any():
+                continue
+            out[ys[ok], xs[ok]] = arr[yy[ok], xx[ok]]
+            still[ok] = False
+    if still.any():
+        med = cv2.medianBlur(arr, 21)
+        out[ys[still], xs[still]] = med[ys[still], xs[still]]
+    return out
+
+
+def _stamp_component_jobs(
+    fg: np.ndarray,
+    margin_px: int,
+    min_area: int,
+) -> list[tuple[float, float, int, bool]]:
+    """每個夠大的圖章：(質心 y, x, 面積, 是否碰框)。"""
+    h, w = fg.shape[:2]
+    n, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        fg.astype(np.uint8), connectivity=8
+    )
+    if n <= 1:
+        return []
+    edge = _edge_band_mask(h, w, margin_px)
+    touching = {int(i) for i in np.unique(labels[edge]) if 0 < int(i) < n}
+    jobs: list[tuple[float, float, int, bool]] = []
+    min_area = max(40, int(min_area))
+    for i in range(1, n):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < min_area:
+            continue
+        jobs.append(
+            (
+                float(centroids[i][1]),
+                float(centroids[i][0]),
+                area,
+                i in touching,
+            )
+        )
+    return jobs
+
+
 def extract_interior_motifs(
     arr: np.ndarray,
     bg: Sequence[int],
@@ -197,7 +543,7 @@ def extract_interior_motifs(
     碰邊與否用 `labels[edge]` 一次查完，取 mask 只在各自的外接矩形內做。
     逐個圖案跑 `labels == i` 是全圖掃描，圖案上萬個時就是上千億次運算。
     """
-    fg = _join_foreground(arr, bg, threshold)
+    fg = _stamp_foreground(arr, bg, threshold)
     edge = _edge_band_mask(*arr.shape[:2], margin_px)
     n, labels, stats, _ = cv2.connectedComponentsWithStats(fg, connectivity=8)
     interior = np.ones(n, dtype=bool)
@@ -223,6 +569,7 @@ def remove_edge_touching_components(
     bg: Sequence[int],
     threshold: float,
     margin_px: int,
+    min_area: int = 40,
 ) -> tuple[np.ndarray, list[tuple[float, float, int]]]:
     """
     刪除碰到邊緣帶的整塊連通前景。
@@ -234,7 +581,7 @@ def remove_edge_touching_components(
     if margin_px <= 0:
         return out, removed
 
-    fg = _join_foreground(out, bg, threshold)
+    fg = _stamp_foreground(out, bg, threshold)
     edge = _edge_band_mask(h, w, margin_px)
     bg_rgb = np.array(bg, dtype=np.uint8)
     n, labels, stats, centroids = cv2.connectedComponentsWithStats(
@@ -245,25 +592,71 @@ def remove_edge_touching_components(
     if touching.size == 0:
         return out, removed
 
-    min_area = 40
+    min_area = max(40, int(min_area))
+    touch_set = {int(i) for i in touching}
+    lut = np.zeros(n, dtype=bool)
     for i in touching:
         area = int(stats[i, cv2.CC_STAT_AREA])
         if area < min_area:
             continue
+        frame_hit = int(np.count_nonzero(labels[edge] == int(i)))
+        if frame_hit <= 5 and area >= min_area * 3:
+            continue
+        lut[int(i)] = True
         # OpenCV centroid 是 (x, y)
         removed.append(
             (
                 float(centroids[i][1]),
                 float(centroids[i][0]),
                 area,
+                True,
             )
         )
+    if not removed:
+        return out, removed
     # 一次做完：膨脹對聯集與逐塊分別做的結果相同，但省掉上萬次全圖掃描
-    lut = np.zeros(n, dtype=bool)
-    lut[touching] = True
-    ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     kill = cv2.dilate(lut[labels].astype(np.uint8), ker).astype(bool)
-    out[kill] = bg_rgb
+    overlay = _overlay_stamp_mask(arr, bg, threshold)
+    if overlay is None:
+        raw = _foreground_mask(arr, bg, threshold)
+        if int(np.count_nonzero(raw)) > int(np.count_nonzero(fg)) * 1.08:
+            # 開運算拆葉後，畫框附近的葉脈殘段仍連著內部花叢。
+            # 把外圈原稿前景一起清掉，並把落在這一帶的單朵列入補花。
+            wide_px = max(24, min(h, w) // 30)
+            wide = _edge_band_mask(h, w, wide_px)
+            kill = kill | (raw.astype(bool) & wide)
+            have = {(round(t[0], 1), round(t[1], 1), int(t[2])) for t in removed}
+            extra_ids = {
+                int(i) for i in np.unique(labels[wide]) if 0 < int(i) < n
+            }
+            for i in extra_ids:
+                if lut[int(i)]:
+                    continue
+                area = int(stats[i, cv2.CC_STAT_AREA])
+                if area < min_area:
+                    continue
+                job = (
+                    float(centroids[i][1]),
+                    float(centroids[i][0]),
+                    area,
+                    int(i) in touch_set,
+                )
+                key = (round(job[0], 1), round(job[1], 1), int(job[2]))
+                if key in have:
+                    continue
+                have.add(key)
+                lut[int(i)] = True
+                removed.append(job)
+        else:
+            bridges = raw & ~fg.astype(bool)
+            if bridges.any():
+                band = _edge_band_mask(h, w, max(16, min(h, w) // 40))
+                kill = kill | (bridges & band)
+    if overlay is not None:
+        out[kill] = cv2.medianBlur(arr, 21)[kill]
+    else:
+        out[kill] = bg_rgb
     return out, removed
 
 
@@ -311,13 +704,24 @@ def _overlap_ratio(
 def _pick_motif(motifs: list[MotifStamp], target_area: int, rng: np.random.Generator) -> MotifStamp:
     if len(motifs) == 1:
         return motifs[0]
-    areas = np.array([m.area for m in motifs], dtype=np.float64)
-    # 偏好面積接近被刪圖案者
+    lo = max(40.0, float(target_area) * 0.45)
+    hi = float(target_area) * 2.2
+    pool = [m for m in motifs if lo <= m.area <= hi]
+    if not pool:
+        pool = sorted(motifs, key=lambda m: abs(m.area - target_area))[:8]
+    areas = np.array([m.area for m in pool], dtype=np.float64)
+    fill = np.array([float(m.mask.mean()) for m in pool], dtype=np.float64)
+    med_fill = float(np.median(fill))
+    keep = fill >= med_fill - 0.04
+    if int(keep.sum()) >= 1:
+        pool = [m for m, ok in zip(pool, keep) if ok]
+        areas = areas[keep]
+        fill = fill[keep]
     dist = np.abs(areas - float(target_area))
-    weights = 1.0 / (1.0 + dist / max(float(target_area), 1.0))
+    weights = (1.0 / (1.0 + dist / max(float(target_area), 1.0))) * (fill + 0.05)
     weights = weights / weights.sum()
-    idx = int(rng.choice(len(motifs), p=weights))
-    return motifs[idx]
+    idx = int(rng.choice(len(pool), p=weights))
+    return pool[idx]
 
 
 def _torus_distance(
@@ -354,32 +758,24 @@ def refill_with_wrapped_motifs(
     removed: list[tuple[float, float, int]],
     seed: int = 42,
     max_overlap: float = 0.08,
+    occupied: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     在被清掉的位置用完整圖案環繞貼回。
 
-    碰邊殘片的質心仍靠近邊緣，完整圖章貼上去會跨過邊界出現在對邊，
-    這才是四方連續。但不能無上限疊貼：細線幾何一朵雪花碎成幾十個殘片
-    質心，每點都蓋一朵完整的，wrap 線上兩朵撞在一起，熱點比原稿還高。
-
-    先用環面重疊門檻貼，邊緣密度夠了就停；仍太疏（會在 2×2 中央留十字
-    空洞）才逐步放寬。大圖章（恐龍等）通常一貼就補滿，走第一道就能過。
+    半截殘片的質心靠近邊緣，完整圖章中心吸到 wrap 線上才會跨縫出現在對邊。
+    內部殘缺維持原位替換。邊緣件優先貼、重疊放寬，避免 2×2 中央留十字空洞。
     """
-    from app.quality import edge_void_ratio
-
     if not motifs:
         return arr
 
     out = arr.copy()
     h, w = out.shape[:2]
     rng = np.random.default_rng(seed)
-    occupied = _foreground_mask(out, bg, threshold).copy()
-    jobs = [
-        (cy, cx, _pick_motif(motifs, area, rng))
-        for cy, cx, area in sorted(removed, key=lambda t: t[2], reverse=True)
-    ]
-    # 第一個值即呼叫端的 max_overlap；後面幾檔只在邊緣仍空洞時才用
-    caps = (max_overlap, 0.12, 0.18, 0.35, 1.01)
+    if occupied is None:
+        occupied = _stamp_foreground(out, bg, threshold).astype(bool)
+    else:
+        occupied = occupied.astype(bool)
 
     def _apply(motif: MotifStamp, cy: float, cx: float) -> None:
         nonlocal occupied
@@ -391,18 +787,47 @@ def refill_with_wrapped_motifs(
         left = int(round(cx - motif.cx))
         occupied[(top + my) % h, (left + mx) % w] = True
 
-    pending = jobs
-    for cap in caps:
+    edge_jobs: list[tuple[float, float, MotifStamp]] = []
+    inner_jobs: list[tuple[float, float, MotifStamp]] = []
+    for item in sorted(removed, key=lambda t: t[2], reverse=True):
+        cy, cx, area = float(item[0]), float(item[1]), int(item[2])
+        forced_edge = len(item) > 3 and bool(item[3])
+        motif = _pick_motif(motifs, area, rng)
+        cy, cx, is_edge = _snap_wrap_placement(
+            cy, cx, area, motif, h, w, forced_edge=forced_edge
+        )
+        (edge_jobs if (is_edge or forced_edge) else inner_jobs).append(
+            (cy, cx, motif)
+        )
+
+    pending_edge = edge_jobs
+    for cap in (0.45, 0.75, 1.01):
         still: list[tuple[float, float, MotifStamp]] = []
+        for cy, cx, motif in pending_edge:
+            if cap < 1.0 and _overlap_ratio(out, motif, cy, cx, occupied) > cap:
+                still.append((cy, cx, motif))
+                continue
+            _apply(motif, cy, cx)
+        pending_edge = still
+        if not pending_edge:
+            break
+    for cy, cx, motif in pending_edge:
+        _apply(motif, cy, cx)
+
+    caps = (max_overlap, 0.12, 0.18, 0.35, 1.01)
+    pending = inner_jobs
+    for cap in caps:
+        still = []
         for cy, cx, motif in pending:
-            if _overlap_ratio(out, motif, cy, cx, occupied) > cap:
+            if cap < 1.0 and _overlap_ratio(out, motif, cy, cx, occupied) > cap:
                 still.append((cy, cx, motif))
                 continue
             _apply(motif, cy, cx)
         pending = still
-        void = edge_void_ratio(out)
-        if void <= 0.22 or not pending:
+        if not pending:
             break
+    for cy, cx, motif in pending:
+        _apply(motif, cy, cx)
     return out
 
 
@@ -1427,6 +1852,171 @@ def _looks_like_discrete_motifs(
     return looks_like_regular_lattice(arr, bg, threshold)
 
 
+def _erase_interior_fragments(
+    cleaned: np.ndarray,
+    bg: Sequence[int],
+    threshold: float,
+    margin_px: int,
+    templates: list[MotifStamp],
+    min_area: int = 200,
+) -> tuple[np.ndarray, list[tuple[float, float, int]]]:
+    """用完整同伴換掉內部缺一塊的圖章（不碰邊的殘缺雪人）。"""
+    from app.quality import _component_solidity
+
+    extra: list[tuple[float, float, int]] = []
+    if len(templates) < 2:
+        return cleaned, extra
+    fg = _stamp_foreground(cleaned, bg, threshold)
+    n, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        fg, connectivity=8
+    )
+    edge = _edge_band_mask(*cleaned.shape[:2], margin_px)
+    touching = set(int(i) for i in np.unique(labels[edge]) if int(i) > 0)
+    recs: list[tuple[int, int, float, float, float]] = []
+    for i in range(1, n):
+        if i in touching:
+            continue
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < max(200, min_area):
+            continue
+        x0 = int(stats[i, cv2.CC_STAT_LEFT])
+        y0 = int(stats[i, cv2.CC_STAT_TOP])
+        bw = int(stats[i, cv2.CC_STAT_WIDTH])
+        bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        roi = labels[y0 : y0 + bh, x0 : x0 + bw] == i
+        solid = _component_solidity(roi)
+        if solid is None:
+            continue
+        recs.append(
+            (
+                i,
+                area,
+                solid,
+                float(centroids[i][1]),
+                float(centroids[i][0]),
+            )
+        )
+    if len(recs) < 4:
+        return cleaned, extra
+    areas = np.array([a for _, a, _, _, _ in recs], dtype=np.float64)
+    sols = np.array([s for _, _, s, _, _ in recs], dtype=np.float64)
+    scored: list[tuple[float, int, float, float, int]] = []
+    for i, area, solid, cy, cx in recs:
+        peer = (areas >= area / 1.80) & (areas <= area * 1.80)
+        if int(peer.sum()) < 3:
+            continue
+        med = float(np.median(sols[peer]))
+        if not (solid < med - 0.08 and solid < 0.80):
+            continue
+        if not any(
+            abs(t.area - area) / max(float(area), 1.0) < 0.55 for t in templates
+        ):
+            continue
+        scored.append((med - solid, i, cy, cx, area))
+    scored.sort(reverse=True)
+    scored = scored[:32]
+    kill = [i for _, i, _, _, _ in scored]
+    extra = [(cy, cx, area, False) for _, _, cy, cx, area in scored]
+    if not kill:
+        return cleaned, extra
+    out = cleaned.copy()
+    lut = np.zeros(n, dtype=bool)
+    lut[np.asarray(kill, dtype=int)] = True
+    ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.dilate(lut[labels].astype(np.uint8), ker).astype(bool)
+    if _overlay_stamp_mask(cleaned, bg, threshold) is not None:
+        out[mask] = cv2.medianBlur(cleaned, 21)[mask]
+    else:
+        out[mask] = np.array(bg, dtype=np.uint8)
+    return out, extra
+
+
+def _erase_unwrapped_frame(
+    arr: np.ndarray,
+    bg: Sequence[int],
+    threshold: float,
+    min_area: int,
+) -> tuple[np.ndarray, list[tuple[float, float, int, bool]]]:
+    """第二輪：畫框上仍沒接到對邊的殘片再清掉。"""
+    from app.quality import _uf_find, _uf_union, _union_find_parent, ink_mask
+
+    extra: list[tuple[float, float, int, bool]] = []
+    overlay = _overlay_stamp_mask(arr, bg, threshold)
+    stamp = _stamp_foreground(arr, bg, threshold)
+    raw = _foreground_mask(arr, bg, threshold)
+    if overlay is not None:
+        fg = overlay
+    elif int(np.count_nonzero(raw)) > int(np.count_nonzero(stamp)) * 1.08:
+        fg = stamp
+    else:
+        fg = ink_mask(arr).astype(np.uint8)
+    h, w = fg.shape[:2]
+    n, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        fg.astype(np.uint8), connectivity=8
+    )
+    if n <= 2:
+        return arr, extra
+    parent = _union_find_parent(n)
+    for y in range(h):
+        a, b = int(labels[y, 0]), int(labels[y, -1])
+        if a and b:
+            _uf_union(parent, a, b)
+    for x in range(w):
+        a, b = int(labels[0, x]), int(labels[-1, x])
+        if a and b:
+            _uf_union(parent, a, b)
+    frame = _edge_band_mask(h, w, 2)
+    frame_ids = {int(i) for i in np.unique(labels[frame]) if int(i) > 0}
+    if not frame_ids:
+        return arr, extra
+    left = {int(i) for i in np.unique(labels[:, :2]) if i > 0}
+    right = {int(i) for i in np.unique(labels[:, w - 2 :]) if i > 0}
+    top = {int(i) for i in np.unique(labels[:2, :]) if i > 0}
+    bot = {int(i) for i in np.unique(labels[h - 2 :, :]) if i > 0}
+
+    def _root_hits(ids: set[int], root: int) -> bool:
+        return any(_uf_find(parent, i) == root for i in ids)
+
+    kill: list[int] = []
+    leftover_min = max(80, min(int(min_area), 200))
+    for i in frame_ids:
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < leftover_min:
+            continue
+        root = _uf_find(parent, i)
+        wrapped = (_root_hits(left, root) and _root_hits(right, root)) or (
+            _root_hits(top, root) and _root_hits(bot, root)
+        )
+        if wrapped:
+            continue
+        kill.append(i)
+        extra.append(
+            (
+                float(centroids[i][1]),
+                float(centroids[i][0]),
+                area,
+                True,
+            )
+        )
+    if not kill:
+        return arr, extra
+    out = arr.copy()
+    lut = np.zeros(n, dtype=bool)
+    lut[np.asarray(kill, dtype=int)] = True
+    ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.dilate(lut[labels].astype(np.uint8), ker).astype(bool)
+    if overlay is None:
+        bridges = raw & ~stamp.astype(bool)
+        if bridges.any():
+            band = _edge_band_mask(h, w, max(16, min(h, w) // 40))
+            mask = mask | (bridges & band)
+    if overlay is not None:
+        out[mask] = cv2.medianBlur(arr, 21)[mask]
+    else:
+        out[mask] = np.array(bg, dtype=np.uint8)
+    return out, extra
+
+
 def _clear_and_refill(
     arr: np.ndarray,
     bg: Sequence[int],
@@ -1436,36 +2026,83 @@ def _clear_and_refill(
     """
     清掉真正碰到畫框的殘片，再用完整圖案環繞貼回。
 
-    碰邊只看最外幾像素。若用 3% 邊緣帶，靠近邊界的完整圖章會被整朵刪掉，
-    補在原位也不跨縫，2×2 正中央仍是十字空洞。細線幾何則相反：5px 太窄，
-    差 6～12px 的完整臂沒被清掉，補花一疊 wrap 熱點比原稿更高。約 1.2%
-    （上限 16px）抓住被框切到的荊棘／冰裂，又遠小於會誤刪完整圖章的 3%。
+    實心圖章只看最外 2px：腳擦到邊的完整刺蝟不刪。細線幾何仍用約 1.2%
+    帶抓住差 6～12px 的臂。內部殘缺（缺一塊的雪人）用完整同伴換掉。
+    格紋點綴先用週期拷貝填回底紋，再把完整蜜蜂全部環繞貼上。
     """
     from app.quality import edge_void_ratio
 
     del margin_px
 
-    touch = max(4, min(16, min(arr.shape[0], arr.shape[1]) // 80))
+    overlay = _overlay_stamp_mask(arr, bg, threshold)
+    fg = _stamp_foreground(arr, bg, threshold)
+    touch = _touch_margin_px(fg)
     motifs = extract_interior_motifs(arr, bg, threshold, touch)
     if len(motifs) < 2:
         return None
-    cleaned, removed = remove_edge_touching_components(
-        arr, bg, threshold, touch
-    )
-    if not removed:
-        return None
-    filled = refill_with_wrapped_motifs(
-        cleaned, bg, threshold, motifs, removed, seed=42
-    )
+    templates = _complete_templates(motifs)
+    if len(templates) < 2:
+        templates = motifs
+    typ = _hero_typical_area(templates)
+    min_area = max(80, int(typ * 0.03))
+    if overlay is not None:
+        jobs = _stamp_component_jobs(overlay, touch, min_area)
+        if not any(job[3] for job in jobs):
+            return None
+        cleaned = _fill_overlay_with_lattice(arr, overlay)
+        filled = refill_with_wrapped_motifs(
+            cleaned,
+            bg,
+            threshold,
+            templates,
+            jobs,
+            seed=42,
+            occupied=np.zeros(cleaned.shape[:2], dtype=bool),
+        )
+        leftover, more = _erase_unwrapped_frame(
+            filled, bg, threshold, min_area
+        )
+        if more:
+            occ = _stamp_foreground(leftover, bg, threshold).astype(bool)
+            filled = refill_with_wrapped_motifs(
+                leftover,
+                bg,
+                threshold,
+                templates,
+                more,
+                seed=43,
+                occupied=occ,
+            )
+    else:
+        cleaned, removed = remove_edge_touching_components(
+            arr, bg, threshold, touch, min_area=min_area
+        )
+        cleaned, extra = _erase_interior_fragments(
+            cleaned, bg, threshold, touch, templates, min_area=min_area
+        )
+        removed = removed + extra
+        if not removed:
+            return None
+        filled = refill_with_wrapped_motifs(
+            cleaned, bg, threshold, templates, removed, seed=42
+        )
+        leftover, more = _erase_unwrapped_frame(
+            filled, bg, threshold, min_area
+        )
+        if more:
+            filled = refill_with_wrapped_motifs(
+                leftover, bg, threshold, templates, more, seed=43
+            )
     if _clear_edge_ruins_motifs(arr, filled, bg, threshold):
         return None
-    before = foreground_ratio(arr, bg, threshold)
-    after = foreground_ratio(filled, bg, threshold)
-    if after < max(0.04, before * 0.55):
-        return None
+    if overlay is None:
+        before = foreground_ratio(arr, bg, threshold)
+        after = foreground_ratio(filled, bg, threshold)
+        if after < max(0.04, before * 0.55):
+            return None
     src_void = edge_void_ratio(arr)
     out_void = edge_void_ratio(filled)
-    if out_void > 0.22 and out_void > src_void + 0.12:
+    if out_void > 0.26 and out_void > src_void + 0.12:
         return None
     return filled
 
@@ -1527,7 +2164,13 @@ def make_seamless_hard_cut(
     # 原稿已經夠好時直接採用：它的成本天生最低，不可能被贏過。門檻刻意
     # 訂得比「可見」還嚴，灰帶要進候選競賽讓成本函數權衡，別讓 4.0 那種
     # 平坦大色塊上看得見的小台階從這裡溜走。
-    if source_looks_seamless(src.rep, src.hotspot):
+    if source_looks_seamless(
+        src.rep,
+        src.hotspot,
+        orphan=src.orphan,
+        fragment=src.fragment,
+        wrap_cut=src.wrap_cut,
+    ):
         _lg("  → 原稿已無縫，直接採用")
         return (
             _unit_image(native, ctx),
@@ -1581,7 +2224,10 @@ def make_seamless_hard_cut(
             bases.append(
                 Base(inset, tag, True, [("inset", (m, m, ih, iw))])
             )
-    if margin_px > 0 and ratio < 0.34:
+    # 雪人等散點前景可到 38%，0.34 會跳過清邊補花、只剩剖開圖章的最小誤差切。
+    if margin_px > 0 and (
+        ratio < 0.42 or _overlay_stamp_mask(arr, bg, threshold) is not None
+    ):
         filled = timed(
             "清邊補花",
             lambda: _clear_and_refill(arr, bg, threshold, margin_px),

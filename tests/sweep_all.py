@@ -22,6 +22,7 @@ import hashlib
 import json
 import multiprocessing as mp
 import os
+import re
 import sys
 import time
 import traceback
@@ -190,6 +191,11 @@ def _contact_sheet(
     body = (
         f"接縫超出 {row['src_wrap_excess']:.1f} → {row['wrap_excess']:.1f}   "
         f"內部 {row['src_internal_excess']:.1f} → {row['internal_excess']:.1f}   "
+        f"熱點 {row.get('src_hotspot', 0):.0f}→{row.get('hotspot', 0):.0f}   "
+        f"掏空 {row.get('src_void', 0):.0%}→{row.get('void', 0):.0%}   "
+        f"殘片 {row.get('src_orphan', 0)}→{row.get('orphan', 0)}   "
+        f"殘缺 {row.get('src_fragment', 0):.0%}→{row.get('fragment', 0):.0%}   "
+        f"切圖 {row.get('src_wrap_cut', 0):.0%}→{row.get('wrap_cut', 0):.0%}   "
         f"還原 {row['design_error']:.0f}   色調 {row['tone_shift']:.1f}   "
         f"{row['src_mode']}→{row['out_mode']}"
         f"{'+ICC' if row['keeps_icc'] else ''}   "
@@ -201,7 +207,22 @@ def _contact_sheet(
 
 
 def check(row: dict) -> list[str]:
-    """驗收條件。與回歸集共用同一套判準。"""
+    """驗收條件。與回歸集／`app.select` 閘門共用同一套判準。"""
+    from app.select import (
+        FRAGMENT_MAX,
+        HOTSPOT_CROP_OK,
+        HOTSPOT_CUT_OK,
+        HOTSPOT_OK,
+        HOTSPOT_REFILL_OK,
+        ORPHAN_RUN_MAX,
+        TONE_MAX,
+        TONE_REFILL_MAX,
+        VOID_DELTA,
+        VOID_MAX,
+        WRAP_CUT_MAX,
+        motif_allowance,
+    )
+
     errs: list[str] = []
 
     # 1. 這是全部的重點：輸出自己接自己時不能看得出縫。
@@ -215,8 +236,10 @@ def check(row: dict) -> list[str]:
     if row["internal_excess"] > allow:
         errs.append(f"內部新增斷裂:{row['internal_excess']:.1f}>{allow:.1f}")
 
-    # 3. 整體色調不能跑掉
-    if row["tone_shift"] > 4.0:
+    # 3. 整體色調不能跑掉。清邊補花只搬原稿圖章，均值會動一點。
+    mode = row.get("mode") or ""
+    tone_ok = TONE_REFILL_MAX if "清邊補花" in mode else TONE_MAX
+    if row["tone_shift"] > tone_ok:
         errs.append(f"色調偏移:{row['tone_shift']:.1f}")
 
     # 4. 平鋪回去要還原得了原設計。這取代了「幾何保真」與「單元不能太小」
@@ -231,7 +254,48 @@ def check(row: dict) -> list[str]:
     if row["src_mode"] == "CMYK" and row["out_mode"] != "CMYK":
         errs.append(f"色彩空間被降級:{row['out_mode']}")
 
-    if "未達標" in row["mode"]:
+    # 6. 圖案完整：平均縫可以是 0（地色接地色），圖章仍被剖開。
+    #    真週期裁切之後 wrap 熱點本來就偏高；最小誤差切若還剖開圖章且熱點
+    #    極高，2×2 就不是完整元素。
+    has_crop = "週期裁切" in mode or "點綴晶格" in mode
+    has_mincut = "最小誤差切" in mode
+    hot = float(row.get("hotspot") or 0.0)
+    if "清邊補花" in mode and "最小誤差切" not in mode and hot > HOTSPOT_REFILL_OK:
+        errs.append(f"結構接縫:{hot:.0f}")
+    elif has_crop and hot > HOTSPOT_CROP_OK:
+        errs.append(f"結構接縫:{hot:.0f}")
+    elif (not has_crop) and (not has_mincut) and "清邊補花" not in mode and hot > HOTSPOT_OK:
+        errs.append(f"結構接縫:{hot:.0f}")
+
+    cut_m = re.search(r"切到圖案([0-9.]+)%", mode)
+    dense_m = re.search(r"帶內圖案([0-9.]+)%", mode)
+    ink_m = re.search(r"前景 ([0-9.]+)%", mode)
+    motif_cut = float(cut_m.group(1)) / 100.0 if cut_m else 0.0
+    motif_dense = float(dense_m.group(1)) / 100.0 if dense_m else 0.0
+    ink = float(ink_m.group(1)) / 100.0 if ink_m else 0.0
+    if motif_cut > motif_allowance(ink, motif_dense):
+        errs.append(f"切線剖開圖案:{motif_cut:.1%}")
+    if has_mincut and (not has_crop) and hot > HOTSPOT_CUT_OK and motif_cut > 0:
+        errs.append(f"結構接縫:{hot:.0f}")
+    elif has_mincut and (not has_crop) and hot > HOTSPOT_CROP_OK:
+        errs.append(f"結構接縫:{hot:.0f}")
+
+    void = float(row.get("void") or 0.0)
+    src_void = float(row.get("src_void") or 0.0)
+    if void > VOID_MAX and void > src_void + VOID_DELTA:
+        errs.append(f"邊緣掏空:{void:.0%}")
+
+    orphan = int(row.get("orphan") or 0)
+    if orphan > ORPHAN_RUN_MAX:
+        errs.append(f"接縫殘片:{orphan}px")
+    frag = float(row.get("fragment") or 0.0)
+    if frag > FRAGMENT_MAX:
+        errs.append(f"圖案殘缺:{frag:.0%}")
+    wrap_cut = float(row.get("wrap_cut") or 0.0)
+    if wrap_cut > WRAP_CUT_MAX:
+        errs.append(f"接縫切圖:{wrap_cut:.0%}")
+
+    if "未達標" in mode:
         errs.append("mode_未達標")
     return errs
 
@@ -261,13 +325,18 @@ def _write_wall_thumb(img: Image.Image, dest: Path) -> None:
 def run_case(job: tuple[str, str, bool]) -> dict:
     folder, name, write_sheet = job
     from app.color_utils import detect_background
-    from app.processor import _to_rgb_array, make_seamless_hard_cut
+    from app.processor import _to_rgb_array, make_seamless_hard_cut, stamp_structure_view
     from app.quality import (
         axis_line_energy,
         design_error,
+        edge_void_ratio,
         geometry_fidelity,
+        motif_fragment_ratio,
         seam_report,
         tone_shift,
+        wrap_cut_ratio,
+        wrap_hotspot,
+        wrap_orphan_run,
     )
     from app.triage import VERDICT_TILEABLE, triage
 
@@ -300,6 +369,8 @@ def run_case(job: tuple[str, str, bool]) -> dict:
         out = _to_rgb_array(unit, bg)
         o_rep = seam_report(out)
 
+        src_view = stamp_structure_view(src)
+        out_view = stamp_structure_view(out)
         row.update(
             {
                 "mode": mode,
@@ -322,6 +393,16 @@ def run_case(job: tuple[str, str, bool]) -> dict:
                 "fidelity": round(geometry_fidelity(src, out), 3),
                 "tone_shift": round(tone_shift(src, out), 2),
                 "design_error": round(design_error(src, out), 2),
+                "src_hotspot": round(wrap_hotspot(src_view), 2),
+                "hotspot": round(wrap_hotspot(out_view), 2),
+                "src_void": round(edge_void_ratio(src), 3),
+                "void": round(edge_void_ratio(out), 3),
+                "src_orphan": wrap_orphan_run(src_view),
+                "orphan": wrap_orphan_run(out_view),
+                "src_fragment": round(motif_fragment_ratio(src_view), 3),
+                "fragment": round(motif_fragment_ratio(out_view), 3),
+                "src_wrap_cut": round(wrap_cut_ratio(src_view), 3),
+                "wrap_cut": round(wrap_cut_ratio(out_view), 3),
                 "unchanged": bool(
                     src.shape == out.shape and np.array_equal(src, out)
                 ),
@@ -446,7 +527,19 @@ def _bucket(row: dict) -> str:
     mode = row.get("mode") or ""
     wrap = float(row.get("wrap_excess") or 0)
     derr = float(row.get("design_error") or 0)
-    if "未達標" in mode or wrap > 2.0 or derr > 40.0:
+    hot = float(row.get("hotspot") or 0)
+    void = float(row.get("void") or 0)
+    orphan = float(row.get("orphan") or 0)
+    frag = float(row.get("fragment") or 0)
+    if (
+        "未達標" in mode
+        or wrap > 2.0
+        or derr > 40.0
+        or hot > 8.0
+        or void > 0.15
+        or orphan > 16
+        or frag > 0.06
+    ):
         return "suspect"
     return "pass"
 
@@ -572,9 +665,14 @@ def inventory(src: Path, probe: int = 80) -> int:
 
 
 def main() -> int:
-    global SRC
+    global SRC, OUT
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", default=str(SRC), help="例圖根目錄（遞迴）")
+    ap.add_argument(
+        "--out",
+        default=str(OUT),
+        help="報告／審查牆輸出目錄",
+    )
     ap.add_argument("--only", default="")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--workers", type=int, default=0)
@@ -610,6 +708,7 @@ def main() -> int:
     _lower_priority()
 
     SRC = Path(args.src)
+    OUT = Path(args.out)
     if not SRC.is_dir():
         print(f"找不到例圖目錄：{SRC}")
         return 1
@@ -650,6 +749,7 @@ def main() -> int:
     huge = [(f, n) for f, n in pairs if _pixels(f, n) >= HUGE_PIXELS]
     workers = args.workers or min(3, os.cpu_count() or 2)
     print(f"來源 {SRC}")
+    print(f"輸出 {OUT}")
     print(f"共 {len(pairs)} 張（大圖 {len(huge)} 張另跑）| 行程 {workers}")
 
     rows: list[dict] = []
@@ -671,8 +771,8 @@ def main() -> int:
         print(
             f"[{done}/{total}] {tag} {key:34s} "
             f"接縫 {r['src_wrap_excess']:6.1f}->{r['wrap_excess']:5.1f} "
-            f"內部 {r['src_internal_excess']:6.1f}->{r['internal_excess']:6.1f} "
-            f"幾何 {r['fidelity']:.2f} {r['elapsed_s']:5.1f}s"
+            f"熱點 {r.get('src_hotspot', 0):5.0f}->{r.get('hotspot', 0):4.0f} "
+            f"{r['elapsed_s']:5.1f}s"
             + (f"  {r['errors']}" if r.get("errors") else ""),
             flush=True,
         )

@@ -324,6 +324,291 @@ def wrap_hotspot(arr: np.ndarray) -> float:
     return max(hot_v, hot_h)
 
 
+def _longest_true_run(mask: np.ndarray) -> int:
+    if mask.size == 0 or not np.any(mask):
+        return 0
+    m = np.empty(mask.size + 2, dtype=np.uint8)
+    m[0] = 0
+    m[-1] = 0
+    m[1:-1] = np.asarray(mask, dtype=np.uint8)
+    d = np.diff(m.view(np.int8))
+    starts = np.flatnonzero(d == 1)
+    ends = np.flatnonzero(d == -1)
+    if starts.size == 0:
+        return 0
+    return int((ends - starts).max())
+
+
+def wrap_orphan_run(arr: np.ndarray) -> int:
+    """
+    wrap 兩側「一側有厚圖案、對邊幾乎沒有」的最長連續段（像素）。
+
+    只看最外 3px 會被對邊另一顆圖章的邊緣墨點騙過：半隻刺蝟對邊只要
+    有一點抗鋸齒，XOR 就斷掉。改看從邊緣往內連續有墨的深度，半截圖章
+    （一側深入、對邊幾乎是地色）才會連成一段。
+    """
+    ink = ink_mask(arr)
+    h, w = ink.shape
+    if h < 8 or w < 8:
+        return 0
+    maxd = min(24, w // 4, h // 4)
+
+    def depth(rows: np.ndarray) -> np.ndarray:
+        is_bg = ~rows
+        has_bg = is_bg.any(axis=1)
+        first_bg = np.argmax(is_bg, axis=1)
+        return np.where(has_bg, first_bg, rows.shape[1]).astype(np.int32)
+
+    left = depth(ink[:, :maxd])
+    right = depth(ink[:, -maxd:][:, ::-1])
+    top = depth(ink[:maxd].T)
+    bot = depth(ink[-maxd:][::-1].T)
+    thick, thin = 8, 2
+    v = ((left >= thick) & (right <= thin)) | ((right >= thick) & (left <= thin))
+    hz = ((top >= thick) & (bot <= thin)) | ((bot >= thick) & (top <= thin))
+    return max(_longest_true_run(v), _longest_true_run(hz))
+
+
+def wrap_both_thick_run(arr: np.ndarray) -> int:
+    """wrap 兩側都有厚圖案的最長連續段。兩隻半截對上時很長，清邊後的空邊是 0。"""
+    ink = ink_mask(arr)
+    h, w = ink.shape
+    if h < 8 or w < 8:
+        return 0
+    maxd = min(24, w // 4, h // 4)
+
+    def depth(rows: np.ndarray) -> np.ndarray:
+        is_bg = ~rows
+        has_bg = is_bg.any(axis=1)
+        first_bg = np.argmax(is_bg, axis=1)
+        return np.where(has_bg, first_bg, rows.shape[1]).astype(np.int32)
+
+    left = depth(ink[:, :maxd])
+    right = depth(ink[:, -maxd:][:, ::-1])
+    top = depth(ink[:maxd].T)
+    bot = depth(ink[-maxd:][::-1].T)
+    thick = 8
+    v = (left >= thick) & (right >= thick)
+    hz = (top >= thick) & (bot >= thick)
+    return max(_longest_true_run(v), _longest_true_run(hz))
+
+
+def _union_find_parent(n: int) -> np.ndarray:
+    return np.arange(n, dtype=np.int32)
+
+
+def _uf_find(parent: np.ndarray, a: int) -> int:
+    while parent[a] != a:
+        parent[a] = parent[parent[a]]
+        a = int(parent[a])
+    return a
+
+
+def _uf_union(parent: np.ndarray, a: int, b: int) -> None:
+    ra, rb = _uf_find(parent, a), _uf_find(parent, b)
+    if ra != rb:
+        parent[rb] = ra
+
+
+def _unwrap_torus_mask(mask: np.ndarray) -> np.ndarray:
+    """把跨縫的連通塊滾到不切開的位置，才能量凸包實心度。"""
+    m = mask
+    cols = m.any(axis=0)
+    if cols.size and bool(cols[0]) and bool(cols[-1]):
+        gap = np.flatnonzero(~cols)
+        if gap.size:
+            m = np.roll(m, -int(gap[0]), axis=1)
+    rows = m.any(axis=1)
+    if rows.size and bool(rows[0]) and bool(rows[-1]):
+        gap = np.flatnonzero(~rows)
+        if gap.size:
+            m = np.roll(m, -int(gap[0]), axis=0)
+    return m
+
+
+def _component_solidity(mask: np.ndarray) -> float | None:
+    roi = mask.astype(np.uint8)
+    cnts, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return None
+    cnt = max(cnts, key=cv2.contourArea)
+    area = float(cv2.contourArea(cnt))
+    if area < 200.0:
+        return None
+    hull = cv2.convexHull(cnt)
+    hull_area = float(cv2.contourArea(hull))
+    if hull_area < 1.0:
+        return None
+    return area / hull_area
+
+
+def motif_fragment_ratio(arr: np.ndarray) -> float:
+    """
+    尺寸相近的圖章裡，實心度明顯低於同伴的比例。
+
+    雪花／枝葉大家都凹，沒有離群值；雪人缺一塊、刺蝟被掏空則會低於同伴。
+    跨縫被切開的同一朵花先在環面上合併再比，避免把正確的四方連續判成殘缺。
+    """
+    ink = ink_mask(arr).astype(np.uint8)
+    h, w = ink.shape
+    if min(h, w) < 32:
+        return 0.0
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(ink, connectivity=8)
+    if n <= 2:
+        return 0.0
+    parent = _union_find_parent(n)
+    for y in range(h):
+        a, b = int(labels[y, 0]), int(labels[y, -1])
+        if a and b:
+            _uf_union(parent, a, b)
+    for x in range(w):
+        a, b = int(labels[0, x]), int(labels[-1, x])
+        if a and b:
+            _uf_union(parent, a, b)
+
+    groups: dict[int, list[int]] = {}
+    for i in range(1, n):
+        groups.setdefault(_uf_find(parent, i), []).append(i)
+
+    recs: list[tuple[int, float]] = []
+    for ids in groups.values():
+        area = int(sum(int(stats[i, cv2.CC_STAT_AREA]) for i in ids))
+        if area < 200:
+            continue
+        member = np.isin(labels, np.asarray(ids, dtype=labels.dtype))
+        solid = _component_solidity(_unwrap_torus_mask(member))
+        if solid is None:
+            continue
+        recs.append((area, solid))
+    if len(recs) < 4:
+        return 0.0
+
+    areas = np.array([a for a, _ in recs], dtype=np.float64)
+    sols = np.array([s for _, s in recs], dtype=np.float64)
+    flagged = 0
+    for i, (area, solid) in enumerate(recs):
+        peer = (areas >= area / 1.55) & (areas <= area * 1.55)
+        if int(peer.sum()) < 4:
+            continue
+        med = float(np.median(sols[peer]))
+        med_a = float(np.median(areas[peer]))
+        # 缺一塊的圖章通常面積也比較小；同面積但帽子造型不同的雪人不要算殘缺。
+        if solid < med - 0.14 and solid < 0.78 and area < med_a * 0.90:
+            flagged += 1
+    return float(flagged) / float(len(recs))
+
+
+def wrap_cut_ratio(arr: np.ndarray) -> float:
+    """
+    碰邊卻沒在環面上接到對邊的圖章，相對內部典型圖章有多大。
+
+    半隻刺蝟停在左緣、右緣是地色時，同伴離群比不到它（面積只有一半，
+    進不了 1.55× 分桶），但這一項會接近 0.5–1。真正跨縫對接的圖章
+    會在對邊合併，不會進分子。
+
+    對邊同列各有一顆完整圖章時，舊邏輯會把它們環面合併、當成接好。
+    合併後面積明顯大於內部典型、或兩邊都幾乎是整顆，仍算切圖。
+
+    帶寬上限 8px：15px（短邊/80）會把離框 10px 的完整小圖章當成切圖。
+    """
+    ink = ink_mask(arr).astype(np.uint8)
+    h, w = ink.shape
+    if min(h, w) < 32:
+        return 0.0
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(ink, connectivity=8)
+    if n <= 2:
+        return 0.0
+    parent = _union_find_parent(n)
+    for y in range(h):
+        a, b = int(labels[y, 0]), int(labels[y, -1])
+        if a and b:
+            _uf_union(parent, a, b)
+    for x in range(w):
+        a, b = int(labels[0, x]), int(labels[-1, x])
+        if a and b:
+            _uf_union(parent, a, b)
+
+    band = max(2, min(8, min(h, w) // 80))
+    left = np.unique(labels[:, :band])
+    right = np.unique(labels[:, w - band :])
+    top = np.unique(labels[:band, :])
+    bot = np.unique(labels[h - band :, :])
+    edge_ids = {
+        int(i)
+        for i in np.concatenate([left, right, top, bot])
+        if int(i) > 0
+    }
+    if not edge_ids:
+        return 0.0
+
+    merged_roots: set[int] = set()
+    for a in left:
+        if a == 0:
+            continue
+        ra = _uf_find(parent, int(a))
+        if any(_uf_find(parent, int(b)) == ra for b in right if b):
+            merged_roots.add(ra)
+    for a in top:
+        if a == 0:
+            continue
+        ra = _uf_find(parent, int(a))
+        if any(_uf_find(parent, int(b)) == ra for b in bot if b):
+            merged_roots.add(ra)
+
+    groups: dict[int, list[int]] = {}
+    for i in range(1, n):
+        groups.setdefault(_uf_find(parent, i), []).append(i)
+
+    interior_areas: list[int] = []
+    wrap_groups: list[tuple[int, list[int]]] = []
+    unmatched_areas: list[int] = []
+    for root, ids in groups.items():
+        area = int(sum(int(stats[i, cv2.CC_STAT_AREA]) for i in ids))
+        if area < 200:
+            continue
+        on_edge = any(i in edge_ids for i in ids)
+        if not on_edge:
+            interior_areas.append(area)
+            continue
+        if root in merged_roots:
+            wrap_groups.append((area, ids))
+            continue
+        unmatched_areas.append(area)
+
+    typical = (
+        float(np.median(interior_areas))
+        if interior_areas
+        else float(max(unmatched_areas, default=0) or 0)
+    )
+    if typical < 80.0:
+        typical = float(max((a for a, _ in wrap_groups), default=0) or 0)
+    if typical < 80.0:
+        return 0.0
+    # 抗鋸齒碎屑會把 typical 拉到幾十像素，完整雪花就被算成 20× 切圖。
+    if len(interior_areas) >= 4:
+        ranked = sorted(interior_areas)
+        typical = max(typical, float(np.median(ranked[len(ranked) // 2 :])))
+
+    for area, ids in wrap_groups:
+        parts = [
+            int(stats[i, cv2.CC_STAT_AREA])
+            for i in ids
+            if int(stats[i, cv2.CC_STAT_AREA]) >= 200
+        ]
+        glued = area > typical * 1.80
+        two_wholes = (
+            len(parts) >= 2
+            and min(parts) > typical * 0.62
+            and area > typical * 1.70
+        )
+        if glued or two_wholes:
+            unmatched_areas.append(area)
+
+    if not unmatched_areas:
+        return 0.0
+    return float(max(unmatched_areas) / typical)
+
+
 @dataclass(frozen=True)
 class ColorShift:
     """兩張同尺寸圖之間的色偏。單位為 0–255 階。"""
