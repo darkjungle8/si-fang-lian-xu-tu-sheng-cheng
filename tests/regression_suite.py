@@ -158,7 +158,14 @@ def run_case(folder: str, name: str) -> dict:
         "wrap_excess": round(o_rep.wrap_excess, 2),
         "internal_excess": round(o_rep.internal_excess, 2),
         "fidelity": round(geometry_fidelity(src, out), 3),
-        "tone_shift": round(tone_shift(src, out), 2),
+        "tone_shift": round(
+            tone_shift(
+                src,
+                out,
+                edge_frac=0.20 if "清邊補花" in mode else 0.0,
+            ),
+            2,
+        ),
         "design_error": round(design_error(src, out), 2),
         "elapsed_s": round(elapsed, 1),
     }

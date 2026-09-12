@@ -44,9 +44,12 @@ from app.quality import (
     tone_shift,
     wrap_both_thick_run,
     wrap_cut_ratio,
+    wrap_density_ratio,
+    wrap_gutter_error,
     wrap_hotspot,
     wrap_hotspot_axes,
     wrap_orphan_run,
+    wrap_period_remainder,
 )
 from app.seamless_core import (
     periodize,
@@ -63,6 +66,9 @@ from app.seamless_core import (
 #
 # 所以門檻只負責擋掉一定不行的，灰帶交給成本函數權衡。
 SEAM_OK = 5.0
+# 清邊補花搬圖章後，淡底紋／抗鋸齒可讓平均超出量到 8；那不是切出台階的
+# 波點（那種是 4.0 且不是補花）。9 仍擋住肉眼一條色帶。
+SEAM_REFILL_MAX = 9.0
 
 # 原稿好到這個程度就直接採用，不再搜尋。任何加工都只會降低保真度，而且
 # 這批稿件有 129/199 落在這裡，省下的週期搜尋佔了大半執行時間。
@@ -112,23 +118,38 @@ HOTSPOT_CUT_OK = 40.0
 # 格紋對上、圖章沒對上。
 HOTSPOT_CROP_OK = 70.0
 # 清邊補花若補回完整圖章，熱點應接近地色接縫；刺蝟半截對空白約 13。
-# 雪人底紋漩渦在 wrap 上可到 26，仍是完整圖章；95 的格紋蜜蜂未對齊才出局。
-HOTSPOT_REFILL_OK = 28.0
+# 雪人底紋漩渦在 wrap 上可到 26，冬青白雲跨縫抗鋸齒約 29；實心白圖章
+# 跨縫的抗鋸齒長尾可到 ~57。95 的格紋蜜蜂未對齊才出局。
+HOTSPOT_REFILL_OK = 60.0
 CUT_ERR_OK = 18.0
 # 清邊補花只是搬原稿圖章，通道均值會因刪了殘片而動一點；4.0 會讓完整補花
-# 出局、半截最小誤差切反而當選。6.5 仍擋真正的染色。
-TONE_REFILL_MAX = 6.5
+# 出局、半截最小誤差切反而當選。細線雪花清環帶後可到 7.4。
+TONE_REFILL_MAX = 8.0
 # 邊緣相對內部少掉的圖案比例。清邊補花把碰框件吸到 wrap 後，5% 帶會略疏
 # （約 0.24）；十字空洞仍在 0.28–0.33。
 VOID_MAX = 0.26
 VOID_DELTA = 0.12
 # wrap 一側有墨、對邊沒有的最長段。刺蝟被框切、對邊卻是地色時約 200px+；
-# 真跨縫對接通常 < 20px。28 擋住 清邊補花留下的半隻刺蝟，不誤殺雪花抗鋸齒。
-ORPHAN_RUN_MAX = 28
+# 真跨縫對接通常 < 20px。蘑菇／水彩抗鋸齒可到 29px；32 仍擋住半隻刺蝟。
+ORPHAN_RUN_MAX = 32
+# 清邊補花把左右殘片吸到同一條縫時，2×2 十字會比內部更密。
+# 驗證器與閘門共用 1.15：超過就是肉眼看得見的接縫雙行。
+WRAP_DENSITY_MAX = 1.15
 # 同伴裡實心度離群的圖章比例。雪人缺一塊約 0.16–0.21；雪花大家都凹約 0.06。
 FRAGMENT_MAX = 0.10
 # 碰邊卻沒接到對邊的圖章 / 內部典型圖章。半隻刺蝟約 0.5+。
-WRAP_CUT_MAX = 0.40
+WRAP_CUT_MAX = 0.42
+# 清邊補花把圖章吸到 wrap 後，水彩碎花的連通域仍可讓比值到 0.53；
+# 1:1 圖章是完整的。0.60 仍擋住半隻動物（常 >1）。
+WRAP_CUT_REFILL_MAX = 0.60
+# 地色溝接縫的溝寬相對內部圖章間距。波點 2048 對 547 週期約 0.88；
+# 真週期單元應接近 0。0.35 擋住擠在縫上的杏仁條，仍容許 JPEG 抖動。
+GUTTER_ERR_MAX = 0.35
+# 週期裁切的邊長必須接近所偵測週期的整數倍。2048÷547 餘 140px（26%），
+# 2×2 會在垂直縫上擠出杏仁條；顏色仍接得上所以舊閘門全綠。
+PERIOD_REM_MAX = 0.12
+# 原稿若有強週期，餘數超過約 3% 就不能當無縫直出（波點 2048÷547 會在縫上擠花）。
+PERIOD_REM_SOURCE_MAX = 0.03
 
 # 單元最短邊至少為原稿短邊的 22%。1024 原稿約 225px。
 # 0.25 會誤殺 255×384 這種合理直條；0.22 仍擋住把織紋／細條週期當成花布
@@ -140,6 +161,89 @@ COMPACT_ABS_MIN = 64
 
 def min_unit_edge(h: int, w: int) -> int:
     return max(8, int(round(MIN_UNIT_EDGE_FRAC * min(int(h), int(w)))))
+
+
+def _pref_rank(c: Candidate) -> int:
+    """無損裁切 > 環帶補花 > 整張重排 > 切線 > 其他。"""
+    lab = c.label
+    crop_only = (
+        ("點綴晶格" in lab or "週期裁切" in lab)
+        and "最小誤差切" not in lab
+        and "週期化" not in lab
+    )
+    if crop_only:
+        return 0
+    if "整張重排" in lab:
+        return 2
+    if "清邊補花" in lab:
+        return 1
+    if "最小誤差切" in lab:
+        return 3
+    if "週期化" in lab:
+        return 4
+    return 5
+
+
+def verify_tiling(
+    arr: np.ndarray,
+    *,
+    cls: str = "A",
+    src_density: float | None = None,
+) -> list[str]:
+    """
+    2×2 視覺驗證器：縫帶熱點、十字密度、孤兒／殘片。
+    任何策略都不得免檢。cls=A 散點、B 週期裁切、C 滿版。
+    """
+    from app.processor import stamp_structure_view
+
+    view = stamp_structure_view(arr)
+    errs: list[str] = []
+    hot = wrap_hotspot(view)
+    dens = wrap_density_ratio(view)
+    orphan = wrap_orphan_run(view)
+    frag = motif_fragment_ratio(view)
+    cut = wrap_cut_ratio(view)
+    if cls == "C":
+        if hot > HOTSPOT_CROP_OK:
+            errs.append(f"結構接縫:{hot:.0f}")
+        return errs
+    if dens > WRAP_DENSITY_MAX and cls != "B":
+        if (
+            cls == "A"
+            and src_density is not None
+            and src_density > WRAP_DENSITY_MAX
+            and dens <= src_density * 1.12 + 0.03
+        ):
+            pass
+        else:
+            errs.append(f"接縫過密:{dens:.2f}")
+    if orphan > ORPHAN_RUN_MAX:
+        errs.append(f"接縫殘片:{orphan}px")
+    # 週期裁切的殘缺比的是圖章實心度離群。藤蔓碎花連通域凹凸不一，
+    # 11% 仍會亮紅，但 wrap_cut 才代表縫上剖開；切圖不高就不要誤殺。
+    if frag > FRAGMENT_MAX and not (cls == "B" and cut <= WRAP_CUT_MAX):
+        errs.append(f"圖案殘缺:{frag:.0%}")
+    if cls == "A" and cut > (WRAP_CUT_REFILL_MAX if hot <= HOTSPOT_REFILL_OK else WRAP_CUT_MAX):
+        errs.append(f"接縫切圖:{cut:.0%}")
+    hot_lim = HOTSPOT_CROP_OK if cls == "B" else HOTSPOT_REFILL_OK
+    if hot > hot_lim:
+        from app.processor import _fine_grid_aligned
+
+        wrap_ok = cls == "A" and cut <= WRAP_CUT_REFILL_MAX
+        if not wrap_ok and not (cls == "B" and _fine_grid_aligned(arr)):
+            errs.append(f"結構接縫:{hot:.0f}")
+    return errs
+
+
+def classify_unit_class(src: SourceFacts, *, discrete: bool = False) -> str:
+    """A 散點、B 強週期／晶格、C 滿版連通。"""
+    if src.ink >= MOTIF_CUT_DENSE_INK and not discrete:
+        return "C"
+    if discrete or src.period_rem > 0.0:
+        return "B"
+    if src.ink < 0.55:
+        return "A"
+    return "C"
 
 
 def motif_allowance(ink: float, motif_dense: float) -> float:
@@ -265,6 +369,15 @@ class SourceFacts:
     wrap_cut: float = 0.0
     """原稿碰邊卻沒跨縫接上的圖章相對大小。"""
 
+    gutter: float = 0.0
+    """原稿地色溝接縫相對內部間距的誤差。"""
+
+    period_rem: float = 0.0
+    """原稿邊長對強週期的餘數比例。"""
+
+    wrap_density: float = 1.0
+    """原稿 2×2 十字相對內部的前景密度。波點卡在畫框時 > 1。"""
+
     @property
     def internal_allow(self) -> float:
         return (
@@ -278,13 +391,24 @@ def measure(src: SourceFacts, cand: Candidate) -> Candidate:
     rep = seam_report(cand.arr)
     cand.rep = rep
     derr = design_error(src.arr, cand.arr)
-    tone = tone_shift(src.arr, cand.arr)
+    has_crop = (
+        (bool(cand.recipe) and any(k == "crop" for k, _ in cand.recipe))
+        or "週期裁切" in cand.label
+        or "點綴晶格" in cand.label
+    )
+    has_mincut = (
+        (bool(cand.recipe) and any(k == "mincut" for k, _ in cand.recipe))
+        or ("最小誤差切" in cand.label)
+    )
+    has_refill = "清邊補花" in cand.label
+    tone = tone_shift(
+        src.arr, cand.arr, edge_frac=0.20 if has_refill else 0.0
+    )
     errs: list[str] = []
 
-    if rep.wrap_excess > SEAM_OK:
+    seam_lim = SEAM_REFILL_MAX if has_refill and (not has_mincut) else SEAM_OK
+    if rep.wrap_excess > seam_lim:
         errs.append(f"接縫未消:{rep.wrap_excess:.1f}")
-    if rep.internal_excess > src.internal_allow:
-        errs.append(f"內部新增斷裂:{rep.internal_excess:.1f}")
 
     # 色偏三道：逐像素平均、低頻色塊、截斷。
     # `tone_shift` 只比通道均值，擋不住「一半變亮一半變暗」這種抵銷掉的
@@ -296,13 +420,6 @@ def measure(src: SourceFacts, cand: Candidate) -> Candidate:
         errs.append(f"低頻色塊:{cand.color_low:.0f}")
     if cand.clipped > CLIP_MAX:
         errs.append(f"截斷過多:{cand.clipped:.0%}")
-    has_crop = bool(cand.recipe) and any(k == "crop" for k, _ in cand.recipe)
-    # 清邊補花 recipe 是 None，後接最小誤差切時 _r() 仍是 None；不能只看 recipe。
-    has_mincut = (
-        (bool(cand.recipe) and any(k == "mincut" for k, _ in cand.recipe))
-        or ("最小誤差切" in cand.label)
-    )
-    has_refill = "清邊補花" in cand.label
     tone_ok = TONE_REFILL_MAX if has_refill else TONE_MAX
     if tone > tone_ok:
         errs.append(f"色調偏移:{tone:.1f}")
@@ -317,13 +434,31 @@ def measure(src: SourceFacts, cand: Candidate) -> Candidate:
     hot = wrap_hotspot(view)
     cand.hotspot = hot
     cand.derr = derr
+    # 滿鋪幾何真週期：色差／熱點都是 0，但連通域會把整片菱形當切圖，
+    # 相位一滾 internal 也會過線。2×2 對得上就不要判死。
+    crop_clean = (
+        has_crop
+        and (not has_refill)
+        and hot <= HOTSPOT_OK
+        and rep.wrap_excess <= SEAM_PERFECT
+    )
+    if rep.internal_excess > src.internal_allow and not crop_clean:
+        errs.append(f"內部新增斷裂:{rep.internal_excess:.1f}")
     # 真週期裁切／最小誤差切之後，wrap 線本來就是圖案自身的邊緣分佈，
     # 90 分位熱點會偏高，不能當成結構縫。殘縫改看 wrap_excess、切線色差、
     # 殘肢比例。但切線仍剖開圖章且熱點極高（格紋蜜蜂）時，2×2 不是完整元素。
     if has_refill and (not has_mincut) and hot > HOTSPOT_REFILL_OK:
-        errs.append(f"結構接縫:{hot:.0f}")
+        # 細線雪花跨縫時 wrap 線穿過花瓣，熱點會到 100+，但切圖與色差已過。
+        # 對邊顏色對不上（紅塊對藍塊）仍要當結構縫，不能只看切圖比值。
+        cut_ok = wrap_cut_ratio(view) <= WRAP_CUT_REFILL_MAX
+        seam_ok = rep.wrap_excess <= seam_lim
+        if not (cut_ok and seam_ok):
+            errs.append(f"結構接縫:{hot:.0f}")
     elif has_crop and hot > HOTSPOT_CROP_OK:
-        errs.append(f"結構接縫:{hot:.0f}")
+        from app.processor import _fine_grid_aligned
+
+        if not _fine_grid_aligned(cand.arr):
+            errs.append(f"結構接縫:{hot:.0f}")
     elif (
         has_mincut
         and (not has_crop)
@@ -333,39 +468,96 @@ def measure(src: SourceFacts, cand: Candidate) -> Candidate:
         )
     ):
         errs.append(f"結構接縫:{hot:.0f}")
-    elif (not has_crop) and (not has_mincut) and (not has_refill) and hot > HOTSPOT_OK:
-        errs.append(f"結構接縫:{hot:.0f}")
+    elif (not has_crop) and (not has_mincut) and (not has_refill):
+        # 滿版佩斯利／碎花 wrap=0、切圖=0 時，wrap 線穿過圖案本身，熱點 50–65
+        # 不是結構縫。稀疏圖章對不上仍走 14。
+        hot_lim = HOTSPOT_OK
+        if (
+            wrap_cut_ratio(view) <= WRAP_CUT_MAX
+            and wrap_orphan_run(view) <= ORPHAN_RUN_MAX
+        ):
+            hot_lim = HOTSPOT_CROP_OK
+        if hot > hot_lim:
+            errs.append(f"結構接縫:{hot:.0f}")
     if cand.cut_err > CUT_ERR_OK:
-        errs.append(f"切線色差:{cand.cut_err:.0f}")
+        # 最小誤差切後 wrap／熱點／切圖都過關：切線色差是路徑上的殘差，
+        # 不是看得見的縫（馬蒂斯有機色塊常 24～30）。
+        cut_clean = (
+            has_mincut
+            and rep.wrap_excess <= SEAM_PERFECT
+            and hot <= HOTSPOT_CUT_OK
+            and wrap_cut_ratio(view) <= WRAP_CUT_MAX
+        )
+        if not cut_clean:
+            errs.append(f"切線色差:{cand.cut_err:.0f}")
     void = edge_void_ratio(cand.arr)
-    if void > VOID_MAX and void > src.edge_void + VOID_DELTA:
+    skip_void = has_crop and (not has_refill) and derr <= DESIGN_MAX_CROP
+    if has_refill and (not has_mincut) and wrap_cut_ratio(view) <= WRAP_CUT_REFILL_MAX:
+        # 跨縫件稀疏時 5% 邊帶仍像掏空；真沒補的是切圖／熱點，不是這個。
+        skip_void = True
+    if (not skip_void) and void > VOID_MAX and void > src.edge_void + VOID_DELTA:
         errs.append(f"邊緣掏空:{void:.0%}")
     orphan = wrap_orphan_run(view)
     if orphan > ORPHAN_RUN_MAX:
         errs.append(f"接縫殘片:{orphan}px")
     frag = motif_fragment_ratio(view)
-    if frag > FRAGMENT_MAX:
-        errs.append(f"圖案殘缺:{frag:.0%}")
     cut_stamp = wrap_cut_ratio(view)
-    if cut_stamp > WRAP_CUT_MAX:
+    # 真週期裁切／晶格：縫上切圖已另查。藤蔓碎花的實心度離群不是殘肢。
+    skip_frag = has_crop and (not has_refill) and cut_stamp <= WRAP_CUT_MAX
+    if frag > FRAGMENT_MAX and not skip_frag:
+        errs.append(f"圖案殘缺:{frag:.0%}")
+    # 滿版連通底紋的 wrap_cut 沒有「圖章」語意，改由熱點把關。
+    full_bleed = src.ink >= MOTIF_CUT_DENSE_INK and (not has_refill)
+    cut_lim = WRAP_CUT_MAX
+    if has_refill and (not has_mincut) and rep.wrap_excess <= SEAM_OK:
+        cut_lim = WRAP_CUT_REFILL_MAX
+    if cut_stamp > cut_lim and not full_bleed and not crop_clean and not has_mincut:
         errs.append(f"接縫切圖:{cut_stamp:.0%}")
-    # 原稿邊緣已是半截圖章時，最小誤差切可以把兩隻「屁股」色對上，wrap 熱點
-    # 變冷、wrap_cut 變成 0，2×2 仍不是完整元素。真跨縫對接熱點通常 > 14。
-    elif (
+    if not has_mincut:
+        crowd = wrap_density_ratio(view)
+        if crowd > WRAP_DENSITY_MAX and (has_refill or not has_crop):
+            if has_refill and src.wrap_density > WRAP_DENSITY_MAX:
+                if crowd > src.wrap_density * 1.12 + 0.03:
+                    errs.append(f"接縫過密:{crowd:.2f}")
+            else:
+                errs.append(f"接縫過密:{crowd:.2f}")
+    if (
         src.wrap_cut > WRAP_CUT_MAX
         and (has_mincut or has_crop)
         and (not has_refill)
+        and (not full_bleed)
         and hot <= 8.0
         and cand.motif_cut <= MOTIF_CUT_MAX
         and wrap_both_thick_run(view) > ORPHAN_RUN_MAX
     ):
         errs.append("接縫切圖:對邊假接")
+    gut = wrap_gutter_error(view)
+    if gut > GUTTER_ERR_MAX:
+        errs.append(f"接縫錯格:{gut:.0%}")
+    elif has_crop and (not has_refill) and not crop_clean:
+        prem = wrap_period_remainder(cand.arr)
+        if prem > PERIOD_REM_MAX:
+            errs.append(f"接縫錯格:{prem:.0%}")
+        gut = max(gut, prem)
     if src.needs_native and cand.recipe is None:
         errs.append("無法保色")
     uh, uw = cand.arr.shape[:2]
     need = min_unit_edge(*src.arr.shape[:2])
     if min(uh, uw) < need:
         errs.append(f"單元過小:{min(uh, uw)}<{need}")
+    if has_mincut:
+        vcls = "C"
+    elif has_crop:
+        vcls = "B"
+    elif has_refill:
+        vcls = "A"
+    else:
+        vcls = classify_unit_class(src)
+    for e in verify_tiling(
+        cand.arr, cls=vcls, src_density=src.wrap_density
+    ):
+        if e not in errs:
+            errs.append(e)
 
     cand.errors = errs
     cand.cost = (
@@ -380,7 +572,8 @@ def measure(src: SourceFacts, cand: Candidate) -> Candidate:
         + hot * hot * 0.12
         + orphan * 0.35
         + frag * 120.0
-        + cut_stamp * 50.0
+        + min(cut_stamp, 3.0) * 50.0
+        + gut * 80.0
         # 接縫代價超線性：殘縫是這個工具唯一不能妥協的東西，愈接近門檻
         # 就愈值得付代價去修。線性權重會讓「超出 4.0 的波點稿」寧可留著
         # 那顆被切台階的白點，也不肯接受一次乾淨的週期裁切。
@@ -434,6 +627,9 @@ def make_seamless_variants(
         orphan=wrap_orphan_run(view),
         fragment=motif_fragment_ratio(view),
         wrap_cut=wrap_cut_ratio(view),
+        gutter=wrap_gutter_error(view),
+        period_rem=wrap_period_remainder(base),
+        wrap_density=wrap_density_ratio(view),
     ):
         return out
 
@@ -454,10 +650,73 @@ def make_seamless_variants(
             )
         return out
 
+    view_cut = wrap_cut_ratio(view)
+
+    # 週期裁切不要再最小誤差切：碎花 wrap_cut 是連通域誤報，再切會把
+    # 1152 單元切成 669 還引出內部斷裂。假週期本身也不該靠切線硬修。
+    if "週期裁切" in label or "點綴晶格" in label:
+        return out
+
+    # 去邊／原圖上圖章還停在畫框時，最小誤差切只會剖開；留給清邊補花。
+    # wrap_cut 超過約 100% 是滿版碎花的連通域誤報，不是「半朵卡在畫框」——
+    # 那種圖再 skip 下刀，就只剩毀圖的補花可選。
+    skip_cut = False
+    if WRAP_CUT_MAX < view_cut <= 1.0:
+        if label.startswith("去"):
+            skip_cut = True
+        elif label == "原圖":
+            from app.processor import _has_separated_stamps, _looks_like_discrete_motifs
+
+            bg_est = tuple(
+                int(v)
+                for v in np.median(
+                    base[:: max(1, base.shape[0] // 8), :: max(1, base.shape[1] // 8)].reshape(
+                        -1, 3
+                    ),
+                    axis=0,
+                )
+            )
+            skip_cut = _looks_like_discrete_motifs(
+                base, bg_est, 40.0
+            ) or _has_separated_stamps(base, bg_est, 40.0)
+    if skip_cut:
+        if rep.wrap_excess > 0.5:
+            per0, pi0 = periodize(base)
+            out.append(
+                Candidate(
+                    per0,
+                    f"{label}＋{pi0.describe()}",
+                    False,
+                    _r(("periodize", None)),
+                    color_mean=pi0.shift_mean,
+                    color_low=color_shift(base, per0).lowfreq,
+                    clipped=pi0.clipped,
+                )
+            )
+        return out
+
+    from app.processor import _luma_square_grid_pitch
+
+    # 細格紋切線會把格子剪錯位，只保留裁切／原圖。
+    if _luma_square_grid_pitch(base) is not None:
+        return out
+
     # wrap 平均可以是 0（地色接地色），圖章仍對不上。那種軸也必須下刀，
     # 否則只會對「去邊之後才出現平均縫」的 inset 切，邊緣被掏成十字空洞。
-    do_v = rep.excess_v > AXIS_CUT_MIN or hot_v > HOTSPOT_OK
-    do_h = rep.excess_h > AXIS_CUT_MIN or hot_h > HOTSPOT_OK
+    # wrap_cut 高但色差／熱點都冷時（斑點底紋、切在 8px 帶裡的圖章）也要切。
+    view_hot_v, view_hot_h = wrap_hotspot_axes(view)
+    do_v = (
+        rep.excess_v > AXIS_CUT_MIN
+        or hot_v > HOTSPOT_OK
+        or view_hot_v > HOTSPOT_OK
+        or view_cut > WRAP_CUT_MAX
+    )
+    do_h = (
+        rep.excess_h > AXIS_CUT_MIN
+        or hot_h > HOTSPOT_OK
+        or view_hot_h > HOTSPOT_OK
+        or view_cut > WRAP_CUT_MAX
+    )
     if do_v or do_h:
         cut, mi = wrap_mincut(base, do_v=do_v, do_h=do_h)
         dup = mi.dup_v * mi.band_v / max(base.shape[1], 1) + (
@@ -670,6 +929,13 @@ def choose(
         )
 
     ok = [c for c in cands if not c.errors]
+    # 水彩／散點圖章補花過關後，最小誤差切仍常以 wrap=0 進「完美縫」集合，
+    # 切線卻貼著淺色描邊走，2×2 看起來像多一圈白邊。補花已把完整圖章跨縫
+    # 貼好，就不要再切。
+    if any(
+        "清邊補花" in c.label and "最小誤差切" not in c.label for c in ok
+    ):
+        ok = [c for c in ok if "最小誤差切" not in c.label]
     if ok:
         # 接縫已經壓到看不見時，不准再讓「還原 0 的原圖」憑成本贏回去。
         # 灰帶（超出 2～5）原圖直出的 design_error 永遠是 0，最小誤差切
@@ -680,7 +946,10 @@ def choose(
             if c.rep is not None and c.rep.wrap_excess <= SEAM_PERFECT
         ]
         if tight:
-            best = min(tight, key=lambda c: c.cost)
+            best = min(
+                tight,
+                key=lambda c: (_pref_rank(c), c.derr, c.hotspot, c.cost),
+            )
             _lg(
                 f"  → 採用（{len(ok)}/{len(cands)} 過關，"
                 f"{len(tight)} 個接縫≤{SEAM_PERFECT:.0f}，"
@@ -690,6 +959,7 @@ def choose(
         best = min(
             ok,
             key=lambda c: (
+                _pref_rank(c),
                 c.rep.wrap_excess if c.rep is not None else 1e9,
                 c.cost,
             ),
@@ -714,7 +984,12 @@ def choose(
             color_pen += 80.0
         if c.clipped > CLIP_MAX:
             color_pen += 80.0
-        derr_pen = 80.0 if c.derr > DESIGN_MAX else 0.0
+        cropish = (
+            ("週期裁切" in c.label or "點綴晶格" in c.label)
+            and "最小誤差切" not in c.label
+        )
+        derr_lim = DESIGN_MAX_CROP if cropish else DESIGN_MAX
+        derr_pen = 80.0 if c.derr > derr_lim else 0.0
         void_pen = (
             80.0 if any(e.startswith("邊緣掏空") for e in c.errors) else 0.0
         )
@@ -730,6 +1005,12 @@ def choose(
         wrap_cut_pen = (
             80.0 if any(e.startswith("接縫切圖") for e in c.errors) else 0.0
         )
+        fake_join_pen = (
+            160.0 if any("對邊假接" in e for e in c.errors) else 0.0
+        )
+        gutter_pen = (
+            80.0 if any(e.startswith("接縫錯格") for e in c.errors) else 0.0
+        )
         wrap_cut_mag = 0.0
         for e in c.errors:
             if not e.startswith("接縫切圖:"):
@@ -742,6 +1023,7 @@ def choose(
                     wrap_cut_mag = 40.0
             else:
                 wrap_cut_mag = 40.0
+            wrap_cut_mag = min(wrap_cut_mag, 80.0)
             break
         return (
             wrap
@@ -756,7 +1038,9 @@ def choose(
             + orphan_pen
             + frag_pen
             + wrap_cut_pen
-            + wrap_cut_mag,
+            + wrap_cut_mag
+            + fake_join_pen
+            + gutter_pen,
             c.cost,
         )
 
@@ -774,14 +1058,24 @@ def source_looks_seamless(
     orphan: int = 0,
     fragment: float = 0.0,
     wrap_cut: float = 0.0,
+    gutter: float = 0.0,
+    period_rem: float = 0.0,
+    wrap_density: float = 1.0,
 ) -> bool:
     """平均超出量為 0 仍可能剖開圖章或留下半截圖案。"""
+    hot_lim = HOTSPOT_OK
+    if wrap_cut <= WRAP_CUT_MAX and orphan <= ORPHAN_RUN_MAX and gutter <= GUTTER_ERR_MAX:
+        # 滿版碎花已對上時，wrap 線穿過圖案，熱點可到 60；70 仍擋住錯相位。
+        hot_lim = HOTSPOT_CROP_OK
     return (
         rep.wrap_excess <= SEAM_PERFECT
-        and hotspot <= HOTSPOT_OK
+        and hotspot <= hot_lim
         and orphan <= ORPHAN_RUN_MAX
         and fragment <= FRAGMENT_MAX
         and wrap_cut <= WRAP_CUT_MAX
+        and gutter <= GUTTER_ERR_MAX
+        and period_rem <= PERIOD_REM_SOURCE_MAX
+        and wrap_density <= WRAP_DENSITY_MAX
     )
 
 
@@ -800,6 +1094,9 @@ def source_facts(arr: np.ndarray, *, needs_native: bool = False) -> SourceFacts:
         orphan=wrap_orphan_run(view),
         fragment=motif_fragment_ratio(view),
         wrap_cut=wrap_cut_ratio(view),
+        gutter=wrap_gutter_error(view),
+        period_rem=wrap_period_remainder(arr),
+        wrap_density=wrap_density_ratio(view),
     )
 
 

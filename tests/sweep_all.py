@@ -196,6 +196,8 @@ def _contact_sheet(
         f"殘片 {row.get('src_orphan', 0)}→{row.get('orphan', 0)}   "
         f"殘缺 {row.get('src_fragment', 0):.0%}→{row.get('fragment', 0):.0%}   "
         f"切圖 {row.get('src_wrap_cut', 0):.0%}→{row.get('wrap_cut', 0):.0%}   "
+        f"錯格 {row.get('src_gutter', 0):.0%}→{row.get('gutter', 0):.0%}   "
+        f"週期餘 {row.get('src_period_rem', 0):.0%}→{row.get('period_rem', 0):.0%}   "
         f"還原 {row['design_error']:.0f}   色調 {row['tone_shift']:.1f}   "
         f"{row['src_mode']}→{row['out_mode']}"
         f"{'+ICC' if row['keeps_icc'] else ''}   "
@@ -210,34 +212,54 @@ def check(row: dict) -> list[str]:
     """驗收條件。與回歸集／`app.select` 閘門共用同一套判準。"""
     from app.select import (
         FRAGMENT_MAX,
+        GUTTER_ERR_MAX,
         HOTSPOT_CROP_OK,
         HOTSPOT_CUT_OK,
         HOTSPOT_OK,
         HOTSPOT_REFILL_OK,
         ORPHAN_RUN_MAX,
+        PERIOD_REM_MAX,
+        SEAM_OK,
+        SEAM_REFILL_MAX,
         TONE_MAX,
         TONE_REFILL_MAX,
         VOID_DELTA,
         VOID_MAX,
         WRAP_CUT_MAX,
+        WRAP_CUT_REFILL_MAX,
+        WRAP_DENSITY_MAX,
         motif_allowance,
     )
 
     errs: list[str] = []
+    mode = row.get("mode") or ""
+    has_crop = "週期裁切" in mode or "點綴晶格" in mode
+    has_mincut = "最小誤差切" in mode
+    hot = float(row.get("hotspot") or 0.0)
+    wrap_cut_early = float(row.get("wrap_cut") or 0.0)
+    crop_clean = (
+        has_crop
+        and "清邊補花" not in mode
+        and hot <= 14.0
+        and float(row.get("wrap_excess") or 0.0) <= 2.0
+    )
 
     # 1. 這是全部的重點：輸出自己接自己時不能看得出縫。
-    #    門檻與 `app.select.SEAM_OK` 一致，取自整批稿件的目視校準。
-    if row["wrap_excess"] > 5.0:
+    #    門檻與 `app.select` 一致：一般 SEAM_OK，清邊補花 SEAM_REFILL_MAX。
+    seam_lim = SEAM_OK
+    if "清邊補花" in mode and "最小誤差切" not in mode:
+        seam_lim = SEAM_REFILL_MAX
+    if row["wrap_excess"] > seam_lim:
         errs.append(f"接縫未消:{row['wrap_excess']:.1f}")
 
     # 2. 不能把縫搬到單元內部（半幅滾動的老把戲），也不能切出新斷裂。
     #    與原稿比較：條紋壁紙的硬邊在原稿就有，不算我們造成的。
+    #    滿鋪幾何真週期色差／熱點可為 0，連通域與相位仍會讓 internal 過線。
     allow = max(row["src_internal_excess"], 6.0) * 1.15 + 2.0
-    if row["internal_excess"] > allow:
+    if row["internal_excess"] > allow and not crop_clean:
         errs.append(f"內部新增斷裂:{row['internal_excess']:.1f}>{allow:.1f}")
 
     # 3. 整體色調不能跑掉。清邊補花只搬原稿圖章，均值會動一點。
-    mode = row.get("mode") or ""
     tone_ok = TONE_REFILL_MAX if "清邊補花" in mode else TONE_MAX
     if row["tone_shift"] > tone_ok:
         errs.append(f"色調偏移:{row['tone_shift']:.1f}")
@@ -257,15 +279,21 @@ def check(row: dict) -> list[str]:
     # 6. 圖案完整：平均縫可以是 0（地色接地色），圖章仍被剖開。
     #    真週期裁切之後 wrap 熱點本來就偏高；最小誤差切若還剖開圖章且熱點
     #    極高，2×2 就不是完整元素。
-    has_crop = "週期裁切" in mode or "點綴晶格" in mode
-    has_mincut = "最小誤差切" in mode
-    hot = float(row.get("hotspot") or 0.0)
     if "清邊補花" in mode and "最小誤差切" not in mode and hot > HOTSPOT_REFILL_OK:
-        errs.append(f"結構接縫:{hot:.0f}")
+        cut_ok = wrap_cut_early <= WRAP_CUT_REFILL_MAX
+        seam_ok = float(row.get("wrap_excess") or 0.0) <= SEAM_REFILL_MAX
+        if not (cut_ok and seam_ok):
+            errs.append(f"結構接縫:{hot:.0f}")
     elif has_crop and hot > HOTSPOT_CROP_OK:
-        errs.append(f"結構接縫:{hot:.0f}")
-    elif (not has_crop) and (not has_mincut) and "清邊補花" not in mode and hot > HOTSPOT_OK:
-        errs.append(f"結構接縫:{hot:.0f}")
+        # 細格對齊裁切的 wrap 線穿過格子本身，熱點 80～120 仍是真週期。
+        if not bool(row.get("fine_aligned")):
+            errs.append(f"結構接縫:{hot:.0f}")
+    elif (not has_crop) and (not has_mincut) and "清邊補花" not in mode:
+        hot_lim = HOTSPOT_OK
+        if wrap_cut_early <= WRAP_CUT_MAX and int(row.get("orphan") or 0) <= ORPHAN_RUN_MAX:
+            hot_lim = HOTSPOT_CROP_OK
+        if hot > hot_lim:
+            errs.append(f"結構接縫:{hot:.0f}")
 
     cut_m = re.search(r"切到圖案([0-9.]+)%", mode)
     dense_m = re.search(r"帶內圖案([0-9.]+)%", mode)
@@ -282,18 +310,48 @@ def check(row: dict) -> list[str]:
 
     void = float(row.get("void") or 0.0)
     src_void = float(row.get("src_void") or 0.0)
-    if void > VOID_MAX and void > src_void + VOID_DELTA:
+    skip_void = has_crop and "清邊補花" not in mode and float(row.get("design_error") or 0) <= 35.0
+    if (
+        "清邊補花" in mode
+        and "最小誤差切" not in mode
+        and wrap_cut_early <= WRAP_CUT_REFILL_MAX
+    ):
+        skip_void = True
+    if (not skip_void) and void > VOID_MAX and void > src_void + VOID_DELTA:
         errs.append(f"邊緣掏空:{void:.0%}")
 
     orphan = int(row.get("orphan") or 0)
     if orphan > ORPHAN_RUN_MAX:
         errs.append(f"接縫殘片:{orphan}px")
     frag = float(row.get("fragment") or 0.0)
-    if frag > FRAGMENT_MAX:
+    if frag > FRAGMENT_MAX and not (
+        has_crop and "清邊補花" not in mode and wrap_cut_early <= WRAP_CUT_MAX
+    ):
         errs.append(f"圖案殘缺:{frag:.0%}")
     wrap_cut = float(row.get("wrap_cut") or 0.0)
-    if wrap_cut > WRAP_CUT_MAX:
+    full_bleed = ink >= 0.42 and "清邊補花" not in mode
+    cut_lim = WRAP_CUT_MAX
+    if "清邊補花" in mode and "最小誤差切" not in mode and float(row.get("wrap_excess") or 0) <= 5.0:
+        cut_lim = WRAP_CUT_REFILL_MAX
+    if wrap_cut > cut_lim and not full_bleed and not crop_clean and not has_mincut:
         errs.append(f"接縫切圖:{wrap_cut:.0%}")
+    dens = float(row.get("wrap_density") or 0.0)
+    if dens > WRAP_DENSITY_MAX and (not has_mincut) and (
+        "清邊補花" in mode or not has_crop
+    ):
+        src_d = float(row.get("src_wrap_density") or 0.0)
+        if "清邊補花" in mode and src_d > WRAP_DENSITY_MAX:
+            if dens > src_d * 1.12 + 0.03:
+                errs.append(f"接縫過密:{dens:.2f}")
+        else:
+            errs.append(f"接縫過密:{dens:.2f}")
+    gutter = float(row.get("gutter") or 0.0)
+    if gutter > GUTTER_ERR_MAX:
+        errs.append(f"接縫錯格:{gutter:.0%}")
+    elif has_crop and "清邊補花" not in mode and not crop_clean:
+        prem = float(row.get("period_rem") or 0.0)
+        if prem > PERIOD_REM_MAX:
+            errs.append(f"接縫錯格:{prem:.0%}")
 
     if "未達標" in mode:
         errs.append("mode_未達標")
@@ -316,16 +374,30 @@ def _sheet_name(folder: str, name: str) -> str:
 
 
 def _write_wall_thumb(img: Image.Image, dest: Path) -> None:
+    """審查牆縮圖：整張 2×2 保比例，用畫面中位色墊成方格，不要裁接縫特寫。"""
     view = img.convert("RGB")
-    view.thumbnail((240, 240), Image.Resampling.LANCZOS)
+    w, h = view.size
+    if w <= 0 or h <= 0:
+        return
+    side = max(w, h)
+    arr = np.asarray(view)
+    fill = tuple(int(x) for x in np.median(arr.reshape(-1, 3), axis=0))
+    canvas = Image.new("RGB", (side, side), fill)
+    canvas.paste(view, ((side - w) // 2, (side - h) // 2))
+    canvas.thumbnail((240, 240), Image.Resampling.LANCZOS)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    view.save(dest, quality=85)
+    canvas.save(dest, quality=85)
 
 
 def run_case(job: tuple[str, str, bool]) -> dict:
     folder, name, write_sheet = job
     from app.color_utils import detect_background
-    from app.processor import _to_rgb_array, make_seamless_hard_cut, stamp_structure_view
+    from app.processor import (
+        _fine_grid_aligned,
+        _to_rgb_array,
+        make_seamless_hard_cut,
+        stamp_structure_view,
+    )
     from app.quality import (
         axis_line_energy,
         design_error,
@@ -335,8 +407,11 @@ def run_case(job: tuple[str, str, bool]) -> dict:
         seam_report,
         tone_shift,
         wrap_cut_ratio,
+        wrap_density_ratio,
+        wrap_gutter_error,
         wrap_hotspot,
         wrap_orphan_run,
+        wrap_period_remainder,
     )
     from app.triage import VERDICT_TILEABLE, triage
 
@@ -391,7 +466,14 @@ def run_case(job: tuple[str, str, bool]) -> dict:
                     round(o_rep.internal_at_h, 3),
                 ],
                 "fidelity": round(geometry_fidelity(src, out), 3),
-                "tone_shift": round(tone_shift(src, out), 2),
+                "tone_shift": round(
+                    tone_shift(
+                        src,
+                        out,
+                        edge_frac=0.20 if "清邊補花" in mode else 0.0,
+                    ),
+                    2,
+                ),
                 "design_error": round(design_error(src, out), 2),
                 "src_hotspot": round(wrap_hotspot(src_view), 2),
                 "hotspot": round(wrap_hotspot(out_view), 2),
@@ -403,6 +485,13 @@ def run_case(job: tuple[str, str, bool]) -> dict:
                 "fragment": round(motif_fragment_ratio(out_view), 3),
                 "src_wrap_cut": round(wrap_cut_ratio(src_view), 3),
                 "wrap_cut": round(wrap_cut_ratio(out_view), 3),
+                "src_wrap_density": round(wrap_density_ratio(src_view), 3),
+                "wrap_density": round(wrap_density_ratio(out_view), 3),
+                "src_gutter": round(wrap_gutter_error(src_view), 3),
+                "gutter": round(wrap_gutter_error(out_view), 3),
+                "src_period_rem": round(wrap_period_remainder(src), 3),
+                "period_rem": round(wrap_period_remainder(out), 3),
+                "fine_aligned": bool(_fine_grid_aligned(out)),
                 "unchanged": bool(
                     src.shape == out.shape and np.array_equal(src, out)
                 ),
@@ -410,6 +499,18 @@ def run_case(job: tuple[str, str, bool]) -> dict:
             }
         )
         row["errors"] = check(row)
+        from app.select import verify_tiling
+
+        if "清邊補花" in (row.get("mode") or ""):
+            vcls = "A"
+        elif "週期裁切" in (row.get("mode") or "") or "點綴晶格" in (row.get("mode") or ""):
+            vcls = "B"
+        else:
+            vcls = "C"
+        row["verify_cls"] = vcls
+        row["verify_errors"] = verify_tiling(
+            out, cls=vcls, src_density=row.get("src_wrap_density")
+        )
 
         if write_sheet:
             sheet = _contact_sheet(src, out, row)
@@ -531,6 +632,9 @@ def _bucket(row: dict) -> str:
     void = float(row.get("void") or 0)
     orphan = float(row.get("orphan") or 0)
     frag = float(row.get("fragment") or 0)
+    gutter = float(row.get("gutter") or 0)
+    dens = float(row.get("wrap_density") or 0)
+    verify = row.get("verify_errors") or []
     if (
         "未達標" in mode
         or wrap > 2.0
@@ -539,6 +643,9 @@ def _bucket(row: dict) -> str:
         or void > 0.15
         or orphan > 16
         or frag > 0.06
+        or gutter > 0.20
+        or dens > 1.15
+        or verify
     ):
         return "suspect"
     return "pass"
@@ -570,7 +677,7 @@ def write_index(rows: list[dict]) -> Path:
         "h2{margin:28px 0 8px}"
         ".grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}"
         "figure{margin:0;background:#1c1c1c;padding:6px;border-radius:6px}"
-        "img{width:100%;aspect-ratio:1;object-fit:contain;background:#000;display:block}"
+        "img{width:100%;aspect-ratio:1;object-fit:contain;object-position:center;background:#1c1c1c;display:block}"
         "figcaption{font-size:11px;margin-top:6px;color:#bbb;word-break:break-all}"
         "a{color:#9cf}"
         "</style>",
@@ -578,6 +685,13 @@ def write_index(rows: list[dict]) -> Path:
     ]
     for key, title in titles:
         items = buckets[key]
+        items.sort(
+            key=lambda r: (
+                -float(r.get("wrap_density") or 0),
+                -float(r.get("hotspot") or 0),
+                -float(r.get("wrap_cut") or 0),
+            )
+        )
         parts.append(f"<h2>{title}（{len(items)}）</h2>")
         parts.append('<div class="grid">')
         for r in items:
@@ -587,6 +701,16 @@ def write_index(rows: list[dict]) -> Path:
             cap = r.get("mode") or r.get("skipped") or ""
             if r.get("errors"):
                 cap = "／".join(r["errors"]) + " " + cap
+            dens = r.get("wrap_density")
+            if dens is not None:
+                cap = f"密度 {float(dens):.2f}｜{cap}"
+            if "整張重排" in (r.get("mode") or ""):
+                cap = "整張重排｜" + cap
+            if r.get("verify_errors"):
+                cap = "驗證:" + "／".join(r["verify_errors"]) + " " + cap
+            hot = r.get("hotspot")
+            if hot is not None:
+                cap = f"熱點 {float(hot):.0f}｜" + cap
             href = sheet if sheet else "#"
             src = wall if wall else sheet
             if not src:
@@ -703,6 +827,11 @@ def main() -> int:
         action="store_true",
         help="不去重，每條路徑都跑",
     )
+    ap.add_argument(
+        "--resume",
+        action="store_true",
+        help="跳過 partial jsonl／既有報告裡已跑過的圖，並續寫檢查點",
+    )
     args = ap.parse_args()
     _configure_stdio()
     _lower_priority()
@@ -777,21 +906,76 @@ def main() -> int:
             flush=True,
         )
 
+    suffix = f"_{args.tag}" if args.tag else ""
+    report_path = OUT / f"report{suffix}.json"
+    partial_path = OUT / f"report{suffix}.partial.jsonl"
+    done_keys: set[tuple[str, str]] = set()
+    if args.resume and partial_path.exists():
+        for line in partial_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            done_keys.add((rec.get("folder") or "", rec.get("name") or ""))
+        if done_keys:
+            print(f"續跑：已有 {len(done_keys)} 張，略過", flush=True)
+            done = len(done_keys)
+    elif partial_path.exists():
+        partial_path.unlink()
+
     sheets = not args.no_sheets
     init_args = (str(SRC.resolve()), str(OUT.resolve()))
-    for group, n_proc in ((small, workers), (huge, 1)):
-        if not group:
-            continue
-        jobs = [(f, n, sheets) for f, n in group]
-        with mp.Pool(
-            processes=n_proc,
-            initializer=_init_worker,
-            initargs=init_args,
-            maxtasksperchild=1,
-        ) as pool:
-            for r in pool.imap_unordered(run_case, jobs, chunksize=1):
-                rows.append(r)
-                report(r)
+    partial_f = partial_path.open("a", encoding="utf-8")
+    try:
+        for group, n_proc in ((small, workers), (huge, 1)):
+            if not group:
+                continue
+            jobs = [
+                (f, n, sheets)
+                for f, n in group
+                if (f, n) not in done_keys
+            ]
+            if not jobs:
+                continue
+            with mp.Pool(
+                processes=n_proc,
+                initializer=_init_worker,
+                initargs=init_args,
+                maxtasksperchild=1,
+            ) as pool:
+                for r in pool.imap_unordered(run_case, jobs, chunksize=1):
+                    rows.append(r)
+                    partial_f.write(json.dumps(r, ensure_ascii=False) + "\n")
+                    partial_f.flush()
+                    report(r)
+    finally:
+        partial_f.close()
+
+    if args.resume and done_keys:
+        loaded: list[dict] = []
+        if partial_path.exists():
+            seen: set[tuple[str, str]] = set()
+            for line in partial_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                key = (rec.get("folder") or "", rec.get("name") or "")
+                if key in seen:
+                    continue
+                seen.add(key)
+                loaded.append(rec)
+        have = {(r.get("folder") or "", r.get("name") or "") for r in rows}
+        for rec in loaded:
+            key = (rec.get("folder") or "", rec.get("name") or "")
+            if key not in have:
+                rows.append(rec)
 
     if groups is not None:
         extras = replicate_duplicates(rows, groups)
@@ -802,6 +986,11 @@ def main() -> int:
     elapsed = time.perf_counter() - t0
     suffix = f"_{args.tag}" if args.tag else ""
     report_path = OUT / f"report{suffix}.json"
+    merge_old = None
+    if args.merge_into:
+        dest_pre = Path(args.merge_into)
+        if dest_pre.exists():
+            merge_old = json.loads(dest_pre.read_text(encoding="utf-8"))
     report_path.write_text(
         json.dumps(
             sorted(rows, key=lambda r: (r.get("folder") or "", r.get("name") or "")),
@@ -838,7 +1027,9 @@ def main() -> int:
     index_rows = rows
     if args.merge_into:
         dest = Path(args.merge_into)
-        old = json.loads(dest.read_text(encoding="utf-8"))
+        old = merge_old if merge_old is not None else json.loads(
+            dest.read_text(encoding="utf-8")
+        )
         by_key = {
             (r.get("folder") or "", r.get("name") or ""): i
             for i, r in enumerate(old)

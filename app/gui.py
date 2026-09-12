@@ -232,9 +232,9 @@ class SeamlessTileApp(ctk.CTk):
         self.margin_slider = ctk.CTkSlider(
             right, from_=0.0, to=15.0, number_of_steps=150, command=self._on_margin_slide
         )
-        self.margin_slider.set(0.0)
+        self.margin_slider.set(3.0)
         self.margin_slider.pack(fill="x", padx=8, pady=3)
-        self.margin_label = ctk.CTkLabel(right, text="0 %（不改圖）")
+        self.margin_label = ctk.CTkLabel(right, text="3.0 %")
         self.margin_label.pack(anchor="w", padx=8)
 
         ctk.CTkLabel(right, text="色差閾值", font=ctk.CTkFont(size=14, weight="bold")).pack(

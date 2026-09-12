@@ -498,7 +498,162 @@ def motif_fragment_ratio(arr: np.ndarray) -> float:
     return float(flagged) / float(len(recs))
 
 
-def wrap_cut_ratio(arr: np.ndarray) -> float:
+def _typical_stamp_area(areas: list[int]) -> float:
+    """內部圖章的代表面積。碎點很多時改看主圖章那一檔。"""
+    if not areas:
+        return 0.0
+    vals = np.asarray(areas, dtype=np.float64)
+    if vals.size < 4:
+        return float(np.median(vals))
+    med = float(np.median(vals))
+    p90 = float(np.percentile(vals, 90))
+    # 與補花模板同一套：雪點把中位數拉下去時改看大圖章。
+    if p90 > med * 6.0:
+        upper = vals[vals >= p90 * 0.45]
+        return float(np.median(upper if upper.size else vals))
+    cut = float(np.percentile(vals, 70))
+    big = vals[vals >= cut]
+    return float(np.median(big if big.size else vals))
+
+
+def _ids_span_frame(stats: np.ndarray, ids: list[int], h: int, w: int) -> bool:
+    """外接框幾乎拉滿一條邊：沿邊底紋，不是單顆圖章。"""
+    max_w = max(int(stats[i, cv2.CC_STAT_WIDTH]) for i in ids)
+    max_h = max(int(stats[i, cv2.CC_STAT_HEIGHT]) for i in ids)
+    return max_w >= int(w * 0.80) or max_h >= int(h * 0.80)
+
+
+def _wrap_group_color_mismatch(
+    arr: np.ndarray, labels: np.ndarray, ids: list[int]
+) -> bool:
+    """
+    環面已併成「一隻圖章」，但對邊墨點顏色對不上。
+
+    面積加起來像真跨縫時，glued／two_wholes 都不會開火；雪花這種同色
+    不同形會在 wrap 上留下長尾色差，2×2 仍是兩朵假接。只給 leftover
+    清掉重貼，不把 wrap_cut 比值拉高（真跨縫細線也曾被比值誤殺）。
+    """
+    if arr.ndim != 3 or not ids:
+        return False
+    nlab = int(labels.max()) + 1
+    lut = np.zeros(nlab, dtype=bool)
+    for i in ids:
+        ii = int(i)
+        if 0 < ii < nlab:
+            lut[ii] = True
+    mem = lut[labels]
+    h, w = labels.shape[:2]
+
+    def _hot(both: np.ndarray, delta: np.ndarray) -> bool:
+        n = int(np.count_nonzero(both))
+        if n < 6:
+            return False
+        vals = delta[both]
+        p75 = float(np.percentile(vals, 75))
+        p90 = float(np.percentile(vals, 90))
+        return p75 >= 28.0 or (n >= 12 and p90 >= 45.0)
+
+    dv = np.abs(arr[:, 0].astype(np.int16) - arr[:, -1].astype(np.int16)).mean(
+        axis=-1
+    )
+    dh = np.abs(arr[0].astype(np.int16) - arr[-1].astype(np.int16)).mean(axis=-1)
+    return _hot(mem[:, 0] & mem[:, -1], dv) or _hot(mem[0] & mem[-1], dh)
+
+
+@dataclass
+class WrapCutRepair:
+    """wrap_cut 量測，以及清邊補花第二輪該清掉的連通域。"""
+
+    ratio: float
+    typical: float
+    labels: np.ndarray
+    stats: np.ndarray
+    centroids: np.ndarray
+    kill_ids: list[int]
+
+
+def _wrap_group_close_k(stats: np.ndarray, n: int) -> int:
+    """與圖章分組相近的閉合核：把掌墊＋趾合成一枚，但不把格點黏成一片。"""
+    areas = [
+        int(stats[i, cv2.CC_STAT_AREA])
+        for i in range(1, n)
+        if int(stats[i, cv2.CC_STAT_AREA]) >= 200
+    ]
+    if len(areas) < 2:
+        return 0
+    hero = float(np.percentile(np.asarray(areas, dtype=np.float64), 85))
+    k = int(round(0.28 * np.sqrt(max(hero, 1.0))))
+    k = max(3, k)
+    if k % 2 == 0:
+        k += 1
+    return k
+
+
+def _merge_near_wrap_groups(
+    parent: np.ndarray,
+    ink: np.ndarray,
+    labels: np.ndarray,
+    stats: np.ndarray,
+    n: int,
+) -> None:
+    """
+    環面閉合：只合併「碰到畫框」的鄰近連通塊。
+
+    腳印跨縫時掌在右邊、趾在左邊，逐塊 union-find 對不上同一列，
+    會被算成切圖。3×3 閉合後它們是同一枚；內部格點不碰框，不合併。
+    """
+    h, w = ink.shape
+    if n <= 2 or h * w > 4_000_000:
+        return
+    k = _wrap_group_close_k(stats, n)
+    if k < 3:
+        return
+    # 2×2 平鋪再閉合：跨縫的掌＋趾會連成同一標籤；只 pad 一圈的話，
+    # 對邊本體仍在原圖裡各算各的。
+    tiled = np.tile(ink.astype(np.uint8), (2, 2))
+    ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    closed = cv2.morphologyEx(tiled, cv2.MORPH_CLOSE, ker)
+    _nc, lab = cv2.connectedComponents(closed, connectivity=8)
+    seam_labs = {
+        int(v)
+        for sl in (lab[:, w - 1], lab[:, w], lab[h - 1, :], lab[h, :])
+        for v in np.unique(sl)
+        if int(v) > 0
+    }
+    if not seam_labs:
+        return
+    buckets: dict[int, list[int]] = {}
+    seen: dict[int, set[int]] = {}
+    for i in range(1, n):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < 80:
+            continue
+        x0 = int(stats[i, cv2.CC_STAT_LEFT])
+        y0 = int(stats[i, cv2.CC_STAT_TOP])
+        bw = int(stats[i, cv2.CC_STAT_WIDTH])
+        bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        roi = labels[y0 : y0 + bh, x0 : x0 + bw] == i
+        keys: set[int] = set()
+        for dy, dx in ((0, 0), (0, w), (h, 0), (h, w)):
+            votes = lab[y0 + dy : y0 + dy + bh, x0 + dx : x0 + dx + bw][roi]
+            if votes.size:
+                keys.add(int(np.bincount(votes.ravel()).argmax()))
+        for key in keys:
+            if key not in seam_labs:
+                continue
+            if i in seen.setdefault(key, set()):
+                continue
+            seen[key].add(i)
+            buckets.setdefault(key, []).append(i)
+    for ids in buckets.values():
+        if len(ids) < 2:
+            continue
+        a0 = ids[0]
+        for b in ids[1:]:
+            _uf_union(parent, a0, b)
+
+
+def wrap_cut_repair(arr: np.ndarray) -> WrapCutRepair:
     """
     碰邊卻沒在環面上接到對邊的圖章，相對內部典型圖章有多大。
 
@@ -508,16 +663,27 @@ def wrap_cut_ratio(arr: np.ndarray) -> float:
 
     對邊同列各有一顆完整圖章時，舊邏輯會把它們環面合併、當成接好。
     合併後面積明顯大於內部典型、或兩邊都幾乎是整顆，仍算切圖。
+    對邊各一截不同圖章、顏色對不上，也當成假接。
 
     帶寬上限 8px：15px（短邊/80）會把離框 10px 的完整小圖章當成切圖。
     """
+    empty = WrapCutRepair(
+        0.0,
+        0.0,
+        np.zeros((0, 0), dtype=np.int32),
+        np.zeros((0, 5), dtype=np.int32),
+        np.zeros((0, 2), dtype=np.float64),
+        [],
+    )
     ink = ink_mask(arr).astype(np.uint8)
     h, w = ink.shape
     if min(h, w) < 32:
-        return 0.0
-    n, labels, stats, _ = cv2.connectedComponentsWithStats(ink, connectivity=8)
+        return empty
+    n, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        ink, connectivity=8
+    )
     if n <= 2:
-        return 0.0
+        return empty
     parent = _union_find_parent(n)
     for y in range(h):
         a, b = int(labels[y, 0]), int(labels[y, -1])
@@ -527,6 +693,7 @@ def wrap_cut_ratio(arr: np.ndarray) -> float:
         a, b = int(labels[0, x]), int(labels[-1, x])
         if a and b:
             _uf_union(parent, a, b)
+    _merge_near_wrap_groups(parent, ink, labels, stats, n)
 
     band = max(2, min(8, min(h, w) // 80))
     left = np.unique(labels[:, :band])
@@ -539,7 +706,7 @@ def wrap_cut_ratio(arr: np.ndarray) -> float:
         if int(i) > 0
     }
     if not edge_ids:
-        return 0.0
+        return WrapCutRepair(0.0, 0.0, labels, stats, centroids, [])
 
     merged_roots: set[int] = set()
     for a in left:
@@ -559,12 +726,34 @@ def wrap_cut_ratio(arr: np.ndarray) -> float:
     for i in range(1, n):
         groups.setdefault(_uf_find(parent, i), []).append(i)
 
+    for root, ids in groups.items():
+        left_hit = any(int(stats[i, cv2.CC_STAT_LEFT]) <= band for i in ids)
+        right_hit = any(
+            int(stats[i, cv2.CC_STAT_LEFT]) + int(stats[i, cv2.CC_STAT_WIDTH])
+            >= w - band
+            for i in ids
+        )
+        top_hit = any(int(stats[i, cv2.CC_STAT_TOP]) <= band for i in ids)
+        bot_hit = any(
+            int(stats[i, cv2.CC_STAT_TOP]) + int(stats[i, cv2.CC_STAT_HEIGHT])
+            >= h - band
+            for i in ids
+        )
+        if (left_hit and right_hit) or (top_hit and bot_hit):
+            merged_roots.add(root)
+
+    canvas = float(h * w)
+    field = canvas * 0.10
     interior_areas: list[int] = []
     wrap_groups: list[tuple[int, list[int]]] = []
+    unmatched_groups: list[tuple[int, list[int]]] = []
     unmatched_areas: list[int] = []
     for root, ids in groups.items():
         area = int(sum(int(stats[i, cv2.CC_STAT_AREA]) for i in ids))
         if area < 200:
+            continue
+        # 滿版連通底紋／沿邊長條不是圖章：不當切圖，也不拉低 typical。
+        if area >= field or _ids_span_frame(stats, ids, h, w):
             continue
         on_edge = any(i in edge_ids for i in ids)
         if not on_edge:
@@ -574,21 +763,17 @@ def wrap_cut_ratio(arr: np.ndarray) -> float:
             wrap_groups.append((area, ids))
             continue
         unmatched_areas.append(area)
+        unmatched_groups.append((area, ids))
 
-    typical = (
-        float(np.median(interior_areas))
-        if interior_areas
-        else float(max(unmatched_areas, default=0) or 0)
-    )
+    typical = _typical_stamp_area(interior_areas)
     if typical < 80.0:
-        typical = float(max((a for a, _ in wrap_groups), default=0) or 0)
+        typical = _typical_stamp_area([a for a, _ in wrap_groups])
     if typical < 80.0:
-        return 0.0
-    # 抗鋸齒碎屑會把 typical 拉到幾十像素，完整雪花就被算成 20× 切圖。
-    if len(interior_areas) >= 4:
-        ranked = sorted(interior_areas)
-        typical = max(typical, float(np.median(ranked[len(ranked) // 2 :])))
+        typical = float(max(unmatched_areas, default=0) or 0)
+    if typical < 80.0:
+        return WrapCutRepair(0.0, 0.0, labels, stats, centroids, [])
 
+    fake_groups: list[tuple[int, list[int]]] = []
     for area, ids in wrap_groups:
         parts = [
             int(stats[i, cv2.CC_STAT_AREA])
@@ -601,12 +786,184 @@ def wrap_cut_ratio(arr: np.ndarray) -> float:
             and min(parts) > typical * 0.62
             and area > typical * 1.70
         )
+        # 對邊各一條杏仁殘片：環面併起來面積仍遠小於完整圖章，舊邏輯
+        # 當成「接好」。波點錯相位就是這樣綠燈的。
+        sliver_join = (
+            len(parts) >= 2
+            and area < typical * 0.75
+            and sum(1 for i in ids if _cc_is_edge_sliver(stats, i, typical)) >= 2
+        )
+        color_fake = _wrap_group_color_mismatch(arr, labels, ids)
         if glued or two_wholes:
             unmatched_areas.append(area)
+            fake_groups.append((area, ids))
+        elif sliver_join:
+            # 用真實合併面積。舊的 0.55×typical 地板會讓補花後剩下的
+            # 碎點永遠卡在 WRAP_CUT_MAX 之上，雪人／毛衣已經跨縫也過不了。
+            unmatched_areas.append(area)
+            fake_groups.append((area, ids))
+        elif color_fake:
+            fake_groups.append((area, ids))
+
+    kill_ids: list[int] = []
+    seen: set[int] = set()
+    for _, ids in unmatched_groups + fake_groups:
+        for i in ids:
+            ii = int(i)
+            if ii in seen or int(stats[ii, cv2.CC_STAT_AREA]) < 80:
+                continue
+            seen.add(ii)
+            kill_ids.append(ii)
 
     if not unmatched_areas:
+        return WrapCutRepair(0.0, typical, labels, stats, centroids, kill_ids)
+    return WrapCutRepair(
+        float(min(max(unmatched_areas) / typical, 8.0)),
+        typical,
+        labels,
+        stats,
+        centroids,
+        kill_ids,
+    )
+
+
+def wrap_cut_ratio(arr: np.ndarray) -> float:
+    return wrap_cut_repair(arr).ratio
+
+
+def wrap_density_ratio(arr: np.ndarray) -> float:
+    """
+    2×2 十字接縫帶前景 / 四個象限內部前景。
+    清邊補花若把左右兩列都留在縫上，正中央會明顯更密，比值 > 1。
+    只看單元外緣會誤判：殘片刪掉後畫框變疏，2×2 卻仍擠成雙行。
+    """
+    ink = ink_mask(arr)
+    h, w = ink.shape
+    if min(h, w) < 32:
+        return 1.0
+    tiled = np.tile(ink.astype(bool), (2, 2))
+    band = max(16, min(h, w) // 10)
+    cross = np.zeros(tiled.shape, dtype=bool)
+    cross[:, w - band : w + band] = True
+    cross[h - band : h + band, :] = True
+    inner = np.zeros(tiled.shape, dtype=bool)
+    for y0 in (0, h):
+        for x0 in (0, w):
+            inner[y0 + band : y0 + h - band, x0 + band : x0 + w - band] = True
+    inner_mean = float(np.mean(tiled[inner])) if inner.any() else 0.0
+    if inner_mean < 1e-4:
+        return 1.0
+    return float(np.mean(tiled[cross])) / inner_mean
+
+
+def _cc_is_edge_sliver(stats: np.ndarray, i: int, typical: float) -> bool:
+    """碰邊殘片：面積遠小於同伴，外接框又細長。"""
+    area = int(stats[i, cv2.CC_STAT_AREA])
+    bw = int(stats[i, cv2.CC_STAT_WIDTH])
+    bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+    if area < 200 or typical < 80.0 or area >= typical * 0.42:
+        return False
+    diam = max(8.0, float(np.sqrt(4.0 * typical / np.pi)))
+    thin_v = bw <= max(8, int(diam * 0.38)) and bh >= max(bw * 1.7, diam * 0.45)
+    thin_h = bh <= max(8, int(diam * 0.38)) and bw >= max(bh * 1.7, diam * 0.45)
+    return bool(thin_v or thin_h)
+
+
+def _interior_bg_runs(occupied: np.ndarray) -> np.ndarray:
+    """一維佔用列的內部地色空檔長度（不含兩端接到 wrap 的溝）。"""
+    m = np.asarray(occupied, dtype=np.uint8)
+    if m.size < 4 or not m.any():
+        return np.zeros(0, dtype=np.int32)
+    padded = np.empty(m.size + 2, dtype=np.uint8)
+    padded[0] = 1
+    padded[-1] = 1
+    padded[1:-1] = m
+    d = np.diff(padded.view(np.int8))
+    starts = np.flatnonzero(d == -1)
+    ends = np.flatnonzero(d == 1)
+    if starts.size == 0:
+        return np.zeros(0, dtype=np.int32)
+    return (ends - starts).astype(np.int32)
+
+
+def wrap_gutter_error(arr: np.ndarray) -> float:
+    """
+    接縫落在地色溝時，溝寬相對內部圖章間距差多少。
+
+    wrap 色差可以是 0：週期裁切把縫滾到兩列波點中間的底色，左右都是綠
+    接綠。但單元寬不是 X 週期的整數倍時，縫上的溝會比內部密得多（兩顆
+    圓幾乎碰上，2×2 看起來像杏仁殘片）或疏得多。圖章真的跨縫（最外 8px
+    有墨）時這項為 0，改由 wrap_cut 負責。
+    """
+    ink = ink_mask(arr)
+    h, w = ink.shape
+    if min(h, w) < 32:
         return 0.0
-    return float(max(unmatched_areas) / typical)
+    band = max(2, min(8, min(h, w) // 80))
+    err = 0.0
+    if not bool(ink[:, :band].any()) and not bool(ink[:, w - band :].any()):
+        err = max(err, _axis_gutter_error(ink.any(axis=0)))
+    if not bool(ink[:band, :].any()) and not bool(ink[h - band :, :].any()):
+        err = max(err, _axis_gutter_error(ink.any(axis=1)))
+    return float(err)
+
+
+def _axis_gutter_error(occupied: np.ndarray) -> float:
+    occ = np.asarray(occupied, dtype=bool)
+    idx = np.flatnonzero(occ)
+    if idx.size < 4:
+        return 0.0
+    wrap_gap = int(idx[0] + (occ.size - 1 - idx[-1]))
+    gaps = _interior_bg_runs(occ)
+    if gaps.size == 0:
+        return 0.0
+    stamp = _interior_bg_runs(~occ)
+    typical_stamp = (
+        float(np.median(stamp[stamp >= 12])) if np.any(stamp >= 12) else 0.0
+    )
+    min_gap = max(16, int(round(typical_stamp * 0.15))) if typical_stamp else 16
+    large = gaps[gaps >= min_gap]
+    if large.size < 3:
+        return 0.0
+    typical_gap = float(np.median(large))
+    if typical_gap < 16.0:
+        return 0.0
+    mad = float(np.median(np.abs(large.astype(np.float64) - typical_gap)))
+    # 散點間距本身就亂，沒有「該有的溝寬」可比較。
+    if mad > typical_gap * 0.35:
+        return 0.0
+    return abs(float(wrap_gap) - typical_gap) / typical_gap
+
+
+def wrap_period_remainder(arr: np.ndarray) -> float:
+    """
+    單元邊長對強週期的最短餘數比例。
+
+    滿幅裁切把高度做成 3×525、寬度仍是 2048 時，Y 整除、X 餘 140px。
+    接縫色差可以是 0（地色溝對上），波點格子卻對不齊。只在兩軸都偵測到
+    強週期時才看該軸；單軸條紋沒有另一軸週期，餘數視為 0。
+    """
+    from app.processor import (
+        _len_period_rem,
+        _luma_square_grid_pitch,
+        _luminance_map,
+        _strong_axis_periods,
+    )
+
+    gray = _luminance_map(arr)
+    h, w = gray.shape[:2]
+    fine = _luma_square_grid_pitch(arr)
+    if fine is not None:
+        return max(_len_period_rem(w, fine[0]), _len_period_rem(h, fine[1]))
+    xs = _strong_axis_periods(gray, 0)[:1]
+    ys = _strong_axis_periods(gray, 1)[:1]
+
+    def _frac(length: int, periods: list[int]) -> float:
+        if not periods:
+            return 0.0
+        return _len_period_rem(length, int(periods[0]))
+
+    return max(_frac(w, xs), _frac(h, ys))
 
 
 @dataclass(frozen=True)
@@ -659,7 +1016,7 @@ def color_shift(before: np.ndarray, after: np.ndarray) -> ColorShift:
     )
 
 
-def tone_shift(src: np.ndarray, out: np.ndarray) -> float:
+def tone_shift(src: np.ndarray, out: np.ndarray, *, edge_frac: float = 0.0) -> float:
     """
     整體色調偏移。
 
@@ -667,13 +1024,25 @@ def tone_shift(src: np.ndarray, out: np.ndarray) -> float:
     最小誤差切與週期裁切會改尺寸，像素仍來自原稿；拿切掉的邊去跟整張原稿
     比均值，等於把「少了一條邊」判成偏色。週期化疊在改尺寸之後的色偏，
     由 `color_mean`／`color_low`／截斷閘門負責。
+
+    清邊補花只改畫框附近：edge_frac>0 時只比內部，避免跨縫貼上的圖章
+    把整張均值拉走。
     """
     if src.shape != out.shape:
         return 0.0
+    a = src
+    b = out
+    if edge_frac > 0.0:
+        h, w = src.shape[:2]
+        band = int(round(min(h, w) * float(edge_frac)))
+        band = min(max(band, 0), h // 4, w // 4)
+        if band > 0:
+            a = src[band : h - band, band : w - band]
+            b = out[band : h - band, band : w - band]
     ch = src.shape[2] if src.ndim == 3 else 1
-    a = src.reshape(-1, ch).mean(axis=0).astype(np.float64)
-    b = out.reshape(-1, ch).mean(axis=0).astype(np.float64)
-    return float(np.abs(a - b).max())
+    am = a.reshape(-1, ch).mean(axis=0).astype(np.float64)
+    bm = b.reshape(-1, ch).mean(axis=0).astype(np.float64)
+    return float(np.abs(am - bm).max())
 
 
 def design_error(

@@ -341,6 +341,36 @@ def _tile_seam_scores(arr: np.ndarray) -> tuple[float, float]:
     )
 
 
+def _gutter_line_offset(
+    fg: np.ndarray, px: int, py: int
+) -> tuple[int, int]:
+    """裁切線落在離圖章最遠的地色溝上。"""
+    px = max(1, int(px))
+    py = max(1, int(py))
+    inv = (~fg.astype(bool)).astype(np.uint8)
+    if not inv.any():
+        return 0, 0
+    dist = cv2.distanceTransform(inv, cv2.DIST_L2, 5)
+    h, w = fg.shape[:2]
+    step_x = max(1, px // 16)
+    step_y = max(1, py // 16)
+    best_x, best_sx = 0, -1.0
+    for ox in range(0, px, step_x):
+        if ox >= w:
+            break
+        s = float(np.min(dist[:, ox]))
+        if s > best_sx:
+            best_sx, best_x = s, ox
+    best_y, best_sy = 0, -1.0
+    for oy in range(0, py, step_y):
+        if oy >= h:
+            break
+        s = float(np.min(dist[oy, :]))
+        if s > best_sy:
+            best_sy, best_y = s, oy
+    return int(best_x) % px, int(best_y) % py
+
+
 def _centroid_seam_offsets(
     cents: list[tuple[float, float, int]],
     h: int,
@@ -550,7 +580,45 @@ def looks_like_regular_lattice(
     if cvx <= max_cv and cvy <= max_cv:
         return True
     nn_cv = _nn_spacing_cv([(cy, cx) for cy, cx, _ in cents])
-    return nn_cv <= max_cv * 0.50 and len(cents) >= 12
+    if nn_cv <= max_cv * 0.50 and len(cents) >= 12:
+        return True
+    return _ink_has_regular_2d_period(fg)
+
+
+def _ink_has_regular_2d_period(fg: np.ndarray) -> bool:
+    """墨水遮罩 2D 自相關：處理抖動波點／交錯格／小密點。"""
+    h, w = fg.shape[:2]
+    side = max(h, w)
+    if side > 256:
+        scale = side / 256.0
+        nw = max(48, int(round(w / scale)))
+        nh = max(48, int(round(h / scale)))
+        small = cv2.resize(
+            fg.astype(np.uint8), (nw, nh), interpolation=cv2.INTER_AREA
+        )
+    else:
+        small = fg.astype(np.uint8)
+    a = small.astype(np.float64)
+    frac = float(a.mean())
+    if frac < 0.02 or frac > 0.72:
+        return False
+    a -= a.mean()
+    spec = np.fft.rfft2(a)
+    ac = np.fft.irfft2(spec * np.conj(spec), s=a.shape)
+    ac[0, 0] = 0.0
+    peak = float(np.max(ac))
+    if peak <= 1e-9:
+        return False
+    ac /= peak
+    yy, xx = np.unravel_index(int(np.argmax(ac)), ac.shape)
+    sh, sw = ac.shape
+    # 原點鄰域不算；週期要落在 8px～1/3 邊
+    dy = min(int(yy), sh - int(yy))
+    dx = min(int(xx), sw - int(xx))
+    dist = float(np.hypot(dy, dx))
+    if dist < 8.0 or dist > min(sh, sw) / 2.8:
+        return False
+    return float(ac[yy, xx]) >= 0.18
 
 
 def _detect_stagger(
@@ -1571,6 +1639,8 @@ def try_discrete_lattice_crop(
             (px // 2, 0),
             (0, py // 2),
         ]
+        gx, gy = _gutter_line_offset(fg, px, py)
+        seeds.append((gx, gy))
         # 大花質心空隙中點（正交格用 1/2 週期；磚縫／交錯用 1/4）
         gap_frac = 0.25 if stagger else 0.5
         for cy, cx, _ in cents_pitch[:10]:

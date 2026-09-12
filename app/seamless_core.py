@@ -28,6 +28,7 @@ from dataclasses import dataclass
 
 import cv2
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 
 # 超過此像素數就改用降取樣解 Poisson。修正場本身極平滑，低解析度解完
 # 再放大幾乎無損；116MP 的圖若走全解析度 FFT 會吃掉數 GB。
@@ -61,6 +62,8 @@ _MOTIF_DILATE_FRAC = 0.002
 # 穿越一列圖案的代價。要大到讓切線寧可繞完整條帶子也不穿過去，但保持有限
 # 值——密花圖整條帶子都對不上時無路可繞，那時就該退回比基礎色差。
 _MOTIF_PENALTY = 1.0e7
+# 頭尾都是墨水才罰；背景走廊（單側地色）成本不加，讓切線繞過完整圖章。
+_INK_CUT_PENALTY = 2.5e3
 
 
 def _as_3d(arr: np.ndarray) -> np.ndarray:
@@ -72,29 +75,45 @@ def _as_3d(arr: np.ndarray) -> np.ndarray:
 # --------------------------------------------------------------------------
 
 
+# 切線每列只准橫移一格。這是八連通路徑、四連通遮罩的對偶：頭尾對不上的
+# 區塊跨不過去，也就不會被剖成兩個來源。允許更大的橫跳時，`_splice_axis`
+# 相鄰列的切點會錯開數十像素，中間那一條取自「另一側的地色」，看起來就是
+# 與底色同色的掃描線斷層（紅底雪人、綠底雪花）。寬花繞不過去時該改走
+# 清邊補花，不要靠跳切假裝繞過。
+_PATH_NEIGHBOR = 1
+
+
 def _min_cost_path(cost: np.ndarray) -> np.ndarray:
-    """在 (h, b) 成本圖裡找一條由上到下、每列橫移不超過 1 的最小成本路徑。"""
+    """
+    在 (h, b) 成本圖裡找一條由上到下的最小成本路徑。
+
+    每列只允許橫移 `_PATH_NEIGHBOR` 格（八連通）。用滑動窗口最小值，O(h·b)。
+    """
     h, b = cost.shape
+    pad = int(_PATH_NEIGHBOR)
     acc = np.empty((h, b), dtype=np.float64)
     back = np.empty((h, b), dtype=np.int32)
     acc[0] = cost[0]
     idx = np.arange(b)
+    win_n = 2 * pad + 1
     for y in range(1, h):
         prev = acc[y - 1]
-        left = np.empty(b, dtype=np.float64)
-        left[0] = np.inf
-        left[1:] = prev[:-1]
-        right = np.empty(b, dtype=np.float64)
-        right[-1] = np.inf
-        right[:-1] = prev[1:]
-        stack = np.stack((left, prev, right))
-        k = np.argmin(stack, axis=0)
-        back[y] = idx + k - 1
-        acc[y] = cost[y] + stack[k, idx]
+        padded = np.empty(b + 2 * pad, dtype=np.float64)
+        padded[:pad] = np.inf
+        padded[pad : pad + b] = prev
+        padded[pad + b :] = np.inf
+        win = sliding_window_view(padded, win_n)
+        k = np.argmin(win, axis=1)
+        acc[y] = cost[y] + win[idx, k]
+        back[y] = idx + k - pad
+        bad = ~np.isfinite(acc[y])
+        if bad.any():
+            back[y, bad] = np.clip(idx[bad], 0, b - 1)
     path = np.empty(h, dtype=np.int32)
-    path[-1] = int(np.argmin(acc[-1]))
+    fin = acc[-1]
+    path[-1] = int(np.argmin(fin)) if np.isfinite(fin).any() else 0
     for y in range(h - 1, 0, -1):
-        path[y - 1] = back[y, path[y]]
+        path[y - 1] = int(np.clip(back[y, path[y]], 0, b - 1))
     return path
 
 
@@ -118,6 +137,31 @@ def _seam_cost(arr: np.ndarray, band: int) -> tuple[np.ndarray, np.ndarray]:
     k = int(round(min(arr.shape[0], w) * _MOTIF_DILATE_FRAC)) | 1
     if k >= 3:
         mask = cv2.dilate(mask, np.ones((k, k), np.uint8))
+    from app.quality import ink_mask
+
+    head_ink = ink_mask(arr[:, :band])
+    tail_ink = ink_mask(arr[:, w - band :])
+    both = head_ink & tail_ink
+    cost = cost + both.astype(np.float64) * _INK_CUT_PENALTY
+    # 圖章外一圈淺色描邊（水彩蝴蝶白邊）不是墨水，舊罰則管不到。
+    # 切線會貼著輪廓走，2×2 看起來像多了一圈白邊。
+    ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    head_halo = cv2.dilate(head_ink.astype(np.uint8), ker).astype(bool) & ~head_ink
+    tail_halo = cv2.dilate(tail_ink.astype(np.uint8), ker).astype(bool) & ~tail_ink
+    cost = cost + (head_halo | tail_halo).astype(np.float64) * (_INK_CUT_PENALTY * 0.7)
+    head_lum = 0.299 * head[..., 0] + 0.587 * head[..., 1] + 0.114 * head[..., 2]
+    tail_lum = 0.299 * tail[..., 0] + 0.587 * tail[..., 1] + 0.114 * tail[..., 2]
+    paper_bits = []
+    if np.any(~head_ink):
+        paper_bits.append(head_lum[~head_ink])
+    if np.any(~tail_ink):
+        paper_bits.append(tail_lum[~tail_ink])
+    if paper_bits:
+        paper = float(np.median(np.concatenate(paper_bits)))
+        bright = ((head_lum > paper + 8) & head_halo) | (
+            (tail_lum > paper + 8) & tail_halo
+        )
+        cost = cost + bright.astype(np.float64) * (_INK_CUT_PENALTY * 0.9)
     return cost, mask
 
 
@@ -353,7 +397,7 @@ def wrap_mincut(
     *,
     do_v: bool = True,
     do_h: bool = True,
-    max_band_frac: float = 0.25,
+    max_band_frac: float = 0.50,
     h_first: bool = False,
 ) -> tuple[np.ndarray, MincutInfo]:
     """
