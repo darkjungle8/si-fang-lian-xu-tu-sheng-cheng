@@ -209,10 +209,15 @@ def _contact_sheet(
 
 
 def check(row: dict) -> list[str]:
-    """驗收條件。與回歸集／`app.select` 閘門共用同一套判準。"""
+    """驗收條件。比生成閘門更緊，專門抓「指標綠、肉眼仍有縫」的假 PASS。"""
     from app.select import (
+        DESIGN_MAX_REFILL_FIX,
+        DESIGN_VISUAL_MAX,
+        EDGE_COLOR_BREAK_MAX,
         FRAGMENT_MAX,
+        FRAGMENT_REFILL_MAX,
         GUTTER_ERR_MAX,
+        GUTTER_VISUAL_MAX,
         HOTSPOT_CROP_OK,
         HOTSPOT_CUT_OK,
         HOTSPOT_OK,
@@ -227,7 +232,11 @@ def check(row: dict) -> list[str]:
         VOID_MAX,
         WRAP_CUT_MAX,
         WRAP_CUT_REFILL_MAX,
+        WRAP_CUT_VISUAL_MAX,
         WRAP_DENSITY_MAX,
+        WRAP_DENSITY_MIN,
+        WRAP_DENSITY_SPARSE_MIN,
+        WRAP_DENSITY_VISUAL_MAX,
         motif_allowance,
     )
 
@@ -235,8 +244,11 @@ def check(row: dict) -> list[str]:
     mode = row.get("mode") or ""
     has_crop = "週期裁切" in mode or "點綴晶格" in mode
     has_mincut = "最小誤差切" in mode
+    has_refill = "清邊補花" in mode
     hot = float(row.get("hotspot") or 0.0)
     wrap_cut_early = float(row.get("wrap_cut") or 0.0)
+    dens_early = float(row.get("wrap_density") or 0.0)
+    src_cut = float(row.get("src_wrap_cut") or 0.0)
     crop_clean = (
         has_crop
         and "清邊補花" not in mode
@@ -245,50 +257,59 @@ def check(row: dict) -> list[str]:
     )
 
     # 1. 這是全部的重點：輸出自己接自己時不能看得出縫。
-    #    門檻與 `app.select` 一致：一般 SEAM_OK，清邊補花 SEAM_REFILL_MAX。
     seam_lim = SEAM_OK
-    if "清邊補花" in mode and "最小誤差切" not in mode:
+    if has_refill and "最小誤差切" not in mode:
         seam_lim = SEAM_REFILL_MAX
     if row["wrap_excess"] > seam_lim:
         errs.append(f"接縫未消:{row['wrap_excess']:.1f}")
 
-    # 2. 不能把縫搬到單元內部（半幅滾動的老把戲），也不能切出新斷裂。
-    #    與原稿比較：條紋壁紙的硬邊在原稿就有，不算我們造成的。
-    #    滿鋪幾何真週期色差／熱點可為 0，連通域與相位仍會讓 internal 過線。
     allow = max(row["src_internal_excess"], 6.0) * 1.15 + 2.0
+    wrap_ok_ie = (
+        has_refill
+        and wrap_cut_early <= WRAP_CUT_VISUAL_MAX
+        and WRAP_DENSITY_MIN <= dens_early <= WRAP_DENSITY_MAX
+        and float(row.get("wrap_excess") or 0.0) <= seam_lim
+    )
+    if wrap_ok_ie:
+        allow += 4.0
     if row["internal_excess"] > allow and not crop_clean:
         errs.append(f"內部新增斷裂:{row['internal_excess']:.1f}>{allow:.1f}")
 
-    # 3. 整體色調不能跑掉。清邊補花只搬原稿圖章，均值會動一點。
-    tone_ok = TONE_REFILL_MAX if "清邊補花" in mode else TONE_MAX
+    tone_ok = TONE_REFILL_MAX if has_refill else TONE_MAX
+    # 散點圖章清邊後邊緣帶色占比會變；與 measure 一致放寬到 40。
+    if has_refill and float(row.get("ink") or 0.0) < 0.42:
+        tone_ok = max(tone_ok, 40.0)
     if row["tone_shift"] > tone_ok:
         errs.append(f"色調偏移:{row['tone_shift']:.1f}")
 
-    # 4. 平鋪回去要還原得了原設計。這取代了「幾何保真」與「單元不能太小」
-    #    兩個舊條件：抓到真週期的裁切就算只剩原圖百分之一大也完全還原，
-    #    而假週期即使尺寸沒變也還原不了。
-    #    這裡看不到候選是怎麼來的，只能擋災難級；細緻的把關在
-    #    `app.select`，那裡分得出裁切類與最小誤差切（後者本來就對不回相位）。
-    if row["design_error"] > 90.0:
-        errs.append(f"設計被改壞:{row['design_error']:.0f}")
+    # 加工件用更緊的毀圖門檻；原圖直出仍用災難級 90。
+    # 清邊補花重排圖章修掉原稿切圖：derr 高是方法本身，不是打散連續底紋。
+    derr = float(row.get("design_error") or 0.0)
+    derr_lim = DESIGN_VISUAL_MAX
+    if has_refill and "最小誤差切" not in mode and src_cut > WRAP_CUT_MAX:
+        if (
+            wrap_cut_early <= WRAP_CUT_REFILL_MAX
+            and WRAP_DENSITY_MIN <= dens_early <= WRAP_DENSITY_MAX
+        ):
+            derr_lim = DESIGN_MAX_REFILL_FIX
+    if has_crop or has_refill:
+        if derr > derr_lim:
+            errs.append(f"設計被改壞:{derr:.0f}")
+    elif derr > 90.0:
+        errs.append(f"設計被改壞:{derr:.0f}")
 
-    # 5. 印刷稿必須維持原色彩空間
     if row["src_mode"] == "CMYK" and row["out_mode"] != "CMYK":
         errs.append(f"色彩空間被降級:{row['out_mode']}")
 
-    # 6. 圖案完整：平均縫可以是 0（地色接地色），圖章仍被剖開。
-    #    真週期裁切之後 wrap 熱點本來就偏高；最小誤差切若還剖開圖章且熱點
-    #    極高，2×2 就不是完整元素。
-    if "清邊補花" in mode and "最小誤差切" not in mode and hot > HOTSPOT_REFILL_OK:
+    if has_refill and "最小誤差切" not in mode and hot > HOTSPOT_REFILL_OK:
         cut_ok = wrap_cut_early <= WRAP_CUT_REFILL_MAX
         seam_ok = float(row.get("wrap_excess") or 0.0) <= SEAM_REFILL_MAX
         if not (cut_ok and seam_ok):
             errs.append(f"結構接縫:{hot:.0f}")
     elif has_crop and hot > HOTSPOT_CROP_OK:
-        # 細格對齊裁切的 wrap 線穿過格子本身，熱點 80～120 仍是真週期。
         if not bool(row.get("fine_aligned")):
             errs.append(f"結構接縫:{hot:.0f}")
-    elif (not has_crop) and (not has_mincut) and "清邊補花" not in mode:
+    elif (not has_crop) and (not has_mincut) and not has_refill:
         hot_lim = HOTSPOT_OK
         if wrap_cut_early <= WRAP_CUT_MAX and int(row.get("orphan") or 0) <= ORPHAN_RUN_MAX:
             hot_lim = HOTSPOT_CROP_OK
@@ -300,7 +321,7 @@ def check(row: dict) -> list[str]:
     ink_m = re.search(r"前景 ([0-9.]+)%", mode)
     motif_cut = float(cut_m.group(1)) / 100.0 if cut_m else 0.0
     motif_dense = float(dense_m.group(1)) / 100.0 if dense_m else 0.0
-    ink = float(ink_m.group(1)) / 100.0 if ink_m else 0.0
+    ink = float(ink_m.group(1)) / 100.0 if ink_m else float(row.get("ink") or 0.0)
     if motif_cut > motif_allowance(ink, motif_dense):
         errs.append(f"切線剖開圖案:{motif_cut:.1%}")
     if has_mincut and (not has_crop) and hot > HOTSPOT_CUT_OK and motif_cut > 0:
@@ -310,11 +331,12 @@ def check(row: dict) -> list[str]:
 
     void = float(row.get("void") or 0.0)
     src_void = float(row.get("src_void") or 0.0)
-    skip_void = has_crop and "清邊補花" not in mode and float(row.get("design_error") or 0) <= 35.0
+    skip_void = has_crop and not has_refill and derr <= 35.0
     if (
-        "清邊補花" in mode
+        has_refill
         and "最小誤差切" not in mode
         and wrap_cut_early <= WRAP_CUT_REFILL_MAX
+        and float(row.get("wrap_density") or 0.0) >= 0.82
     ):
         skip_void = True
     if (not skip_void) and void > VOID_MAX and void > src_void + VOID_DELTA:
@@ -324,34 +346,77 @@ def check(row: dict) -> list[str]:
     if orphan > ORPHAN_RUN_MAX:
         errs.append(f"接縫殘片:{orphan}px")
     frag = float(row.get("fragment") or 0.0)
-    if frag > FRAGMENT_MAX and not (
-        has_crop and "清邊補花" not in mode and wrap_cut_early <= WRAP_CUT_MAX
+    frag_lim = FRAGMENT_MAX
+    if (
+        has_refill
+        and "最小誤差切" not in mode
+        and wrap_cut_early <= WRAP_CUT_VISUAL_MAX
+        and float(row.get("wrap_excess") or 0.0) <= SEAM_OK
+    ):
+        frag_lim = FRAGMENT_REFILL_MAX
+    if frag > frag_lim and not (
+        has_crop and not has_refill and wrap_cut_early <= WRAP_CUT_MAX
     ):
         errs.append(f"圖案殘缺:{frag:.0%}")
+
     wrap_cut = float(row.get("wrap_cut") or 0.0)
-    full_bleed = ink >= 0.42 and "清邊補花" not in mode
+    full_bleed = ink >= 0.42 and not has_refill
     cut_lim = WRAP_CUT_MAX
-    if "清邊補花" in mode and "最小誤差切" not in mode and float(row.get("wrap_excess") or 0) <= 5.0:
-        cut_lim = WRAP_CUT_REFILL_MAX
-    if wrap_cut > cut_lim and not full_bleed and not crop_clean and not has_mincut:
-        errs.append(f"接縫切圖:{wrap_cut:.0%}")
-    dens = float(row.get("wrap_density") or 0.0)
-    if dens > WRAP_DENSITY_MAX and (not has_mincut) and (
-        "清邊補花" in mode or not has_crop
+    if has_refill and "最小誤差切" not in mode and float(row.get("wrap_excess") or 0) <= 5.0:
+        cut_lim = (
+            WRAP_CUT_VISUAL_MAX if ink < 0.42 else WRAP_CUT_REFILL_MAX
+        )
+    if wrap_cut > cut_lim and not full_bleed and not has_mincut:
+        if (not crop_clean) or wrap_cut >= 0.85:
+            errs.append(f"接縫切圖:{wrap_cut:.0%}")
+    # 稀疏圖章：上面 cut_lim 已對齊 VISUAL；此段僅防漏。
+    if (
+        not full_bleed
+        and not has_mincut
+        and ink < 0.42
+        and wrap_cut > WRAP_CUT_VISUAL_MAX
+        and f"接縫切圖:{wrap_cut:.0%}" not in errs
     ):
+        errs.append(f"接縫切圖:{wrap_cut:.0%}")
+
+    dens = float(row.get("wrap_density") or 0.0)
+    if dens > WRAP_DENSITY_MAX and (not has_mincut) and not full_bleed:
         src_d = float(row.get("src_wrap_density") or 0.0)
-        if "清邊補花" in mode and src_d > WRAP_DENSITY_MAX:
+        if has_refill and src_d > WRAP_DENSITY_MAX:
             if dens > src_d * 1.12 + 0.03:
                 errs.append(f"接縫過密:{dens:.2f}")
         else:
             errs.append(f"接縫過密:{dens:.2f}")
+    elif dens > WRAP_DENSITY_VISUAL_MAX and (not has_mincut) and not full_bleed:
+        errs.append(f"接縫過密:{dens:.2f}")
+    if dens < WRAP_DENSITY_MIN and not full_bleed:
+        errs.append(f"接縫過疏:{dens:.2f}")
+    elif (
+        dens > 0
+        and dens < WRAP_DENSITY_SPARSE_MIN
+        and ink < 0.22
+        and not full_bleed
+        and not has_mincut
+    ):
+        errs.append(f"接縫過疏:{dens:.2f}")
+
     gutter = float(row.get("gutter") or 0.0)
-    if gutter > GUTTER_ERR_MAX:
+    gut_lim = GUTTER_VISUAL_MAX if not full_bleed else GUTTER_ERR_MAX
+    if gutter > gut_lim:
         errs.append(f"接縫錯格:{gutter:.0%}")
-    elif has_crop and "清邊補花" not in mode and not crop_clean:
-        prem = float(row.get("period_rem") or 0.0)
-        if prem > PERIOD_REM_MAX:
+    # period_rem：與 select 對齊——清邊補花只在「原稿週期本來乾淨卻被打散」時判錯格。
+    prem = float(row.get("period_rem") or 0.0)
+    src_prem = float(row.get("src_period_rem") or 0.0)
+    if prem > PERIOD_REM_MAX:
+        if has_refill and "最小誤差切" not in mode:
+            if src_prem <= PERIOD_REM_MAX:
+                errs.append(f"接縫錯格:{prem:.0%}")
+        else:
             errs.append(f"接縫錯格:{prem:.0%}")
+
+    edge_brk = float(row.get("edge_color_break") or 0.0)
+    if edge_brk > EDGE_COLOR_BREAK_MAX and not full_bleed:
+        errs.append(f"接縫錯色:{edge_brk:.1f}")
 
     if "未達標" in mode:
         errs.append("mode_未達標")
@@ -389,13 +454,269 @@ def _write_wall_thumb(img: Image.Image, dest: Path) -> None:
     canvas.save(dest, quality=85)
 
 
+# 單張牆鐘硬上限；頂層 Process 逾時 terminate（Pool worker 不能再 spawn）。
+# Windows TerminateProcess 不可攔截：硬殺前先排空 queue，並用子行程最後一筆真結果。
+# 軟目標略低於 90s，留給量測／queue.put；不可把 HARD_CASE_TIMEOUT_S 再往上調。
+HARD_CASE_TIMEOUT_S = 90.0
+WORKER_AIM_S = 82.0
+_QUEUE_BEFORE_KILL_S = 0.25
+
+_PROGRESS_Q = None
+_WORKER_AIM_S = 0.0
+_CASE_T0 = 0.0
+
+
+def _worker_aim_s() -> float:
+    return _WORKER_AIM_S if _WORKER_AIM_S > 0 else WORKER_AIM_S
+
+
+def _seconds_left(t0: float | None = None) -> float:
+    if _PROGRESS_Q is None and _WORKER_AIM_S <= 0:
+        return 1e9
+    start = _CASE_T0 if _CASE_T0 > 0 else (t0 if t0 is not None else time.perf_counter())
+    return _worker_aim_s() - (time.perf_counter() - start)
+
+
+def _apply_worker_gen_budget(aim_s: float) -> None:
+    """壓低 select.gen_budget_for_shape；make_seamless_hard_cut 用它算內部 deadline。"""
+    try:
+        import app.select as select
+    except Exception:
+        return
+    cap = max(8.0, float(aim_s))
+    orig = select.gen_budget_for_shape
+
+    def _capped(h: int, w: int, _orig=orig, _cap=cap) -> float:
+        return min(float(_orig(h, w)), _cap)
+
+    select.gen_budget_for_shape = _capped
+    if hasattr(select, "GEN_BUDGET_S"):
+        select.GEN_BUDGET_S = min(float(select.GEN_BUDGET_S), cap)
+    if hasattr(select, "GEN_BUDGET_LARGE_S"):
+        select.GEN_BUDGET_LARGE_S = min(float(select.GEN_BUDGET_LARGE_S), cap)
+
+
+def _make_seamless_with_budget(img, bg, t_case: float):
+    import inspect
+
+    from app.processor import make_seamless_hard_cut
+
+    if _WORKER_AIM_S <= 0:
+        return make_seamless_hard_cut(img, bg)
+    kwargs: dict = {}
+    deadline = t_case + _WORKER_AIM_S
+    try:
+        params = inspect.signature(make_seamless_hard_cut).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "deadline" in params:
+        kwargs["deadline"] = deadline
+    elif "budget_s" in params:
+        kwargs["budget_s"] = max(1.0, deadline - time.perf_counter())
+    return make_seamless_hard_cut(img, bg, **kwargs)
+
+
+def _case_snap_path(folder: str, name: str) -> Path:
+    return OUT / "_case_snap" / f"{_sheet_name(folder, name)}.json"
+
+
+def _write_case_snap(row: dict) -> None:
+    try:
+        dest = _case_snap_path(row.get("folder") or "", row.get("name") or "")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(dest.suffix + ".tmp")
+        tmp.write_text(json.dumps(row, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(dest)
+    except Exception:
+        pass
+
+
+def _read_case_snap(folder: str, name: str) -> dict | None:
+    path = _case_snap_path(folder, name)
+    try:
+        if not path.is_file():
+            return None
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        return rec if isinstance(rec, dict) else None
+    except Exception:
+        return None
+
+
+def _clear_case_snap(folder: str, name: str) -> None:
+    try:
+        path = _case_snap_path(folder, name)
+        if path.is_file():
+            path.unlink()
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        if tmp.is_file():
+            tmp.unlink()
+    except Exception:
+        pass
+
+
+def _publish_case_row(row: dict) -> None:
+    """增量交卷：快照檔 + queue。父行程硬殺前取最後一筆可用 dict。"""
+    _write_case_snap(row)
+    q = _PROGRESS_Q
+    if q is None:
+        return
+    try:
+        q.put(("ok", dict(row)), timeout=0.4)
+    except Exception:
+        pass
+
+
+def _payload_from_msg(msg) -> dict | None:
+    if isinstance(msg, dict):
+        return msg
+    if isinstance(msg, tuple) and len(msg) == 2 and isinstance(msg[1], dict):
+        return msg[1]
+    return None
+
+
+def _usable_case_row(row: dict | None) -> bool:
+    return _row_rank(row) > 0
+
+
+def _row_rank(row: dict | None) -> int:
+    """3=真單元列，2=跳過／有 mode，1=例外，0=假超時或空。"""
+    if not isinstance(row, dict):
+        return 0
+    if row.get("timed_out") and float(row.get("wrap_excess") or 0) == 999.0:
+        return 0
+    size = row.get("size") or [0, 0]
+    has_tile = False
+    if isinstance(size, (list, tuple)) and len(size) >= 2:
+        try:
+            has_tile = int(size[0]) > 0 and int(size[1]) > 0
+        except (TypeError, ValueError):
+            has_tile = False
+    wrap = row.get("wrap_excess")
+    real_wrap = wrap is not None and float(wrap) != 999.0
+    if has_tile or real_wrap:
+        return 3
+    if row.get("skipped"):
+        return 2
+    if row.get("mode") and "超時" not in str(row.get("mode")):
+        return 2
+    if row.get("error") or row.get("errors") == ["EXCEPTION"]:
+        return 1
+    return 0
+
+
+def _drain_queue(q, wait_s: float = 0.0):
+    last_any = None
+    last_ok = None
+
+    def _eat(item) -> None:
+        nonlocal last_any, last_ok
+        last_any = item
+        rank = _row_rank(_payload_from_msg(item))
+        old_rank = _row_rank(_payload_from_msg(last_ok))
+        if rank > old_rank or (rank == old_rank and rank > 0):
+            last_ok = item
+
+    if wait_s > 0:
+        try:
+            _eat(q.get(timeout=wait_s))
+        except Exception:
+            pass
+    while True:
+        try:
+            _eat(q.get_nowait())
+        except Exception:
+            break
+    return last_ok if last_ok is not None else last_any
+
+
+def _prefer_msg(old, new):
+    if new is None:
+        return old
+    new_rank = _row_rank(_payload_from_msg(new))
+    old_rank = _row_rank(_payload_from_msg(old))
+    if new_rank > old_rank:
+        return new
+    if new_rank == old_rank and new_rank > 0:
+        return new
+    return old if old is not None else new
+
+
+def _row_from_sources(*sources) -> dict | None:
+    best = None
+    best_rank = 0
+    for src in sources:
+        row = src if isinstance(src, dict) else _payload_from_msg(src)
+        rank = _row_rank(row)
+        extra = 0
+        if isinstance(row, dict):
+            extra += 2 if row.get("sheet") else 0
+            extra += 1 if row.get("wall") else 0
+        best_extra = 0
+        if isinstance(best, dict):
+            best_extra += 2 if best.get("sheet") else 0
+            best_extra += 1 if best.get("wall") else 0
+        if rank > best_rank or (rank == best_rank and rank > 0 and extra > best_extra):
+            best = row
+            best_rank = rank
+    return best
+
+
+def _close_queue(q, join: bool = True) -> None:
+    try:
+        q.close()
+    except Exception:
+        pass
+    if not join:
+        return
+    try:
+        q.join_thread()
+    except Exception:
+        pass
+
+
+def _queue_put(q, item, timeout: float = 8.0) -> None:
+    try:
+        q.put(item, timeout=timeout)
+    except Exception:
+        pass
+
+
+def _case_process_main(queue, job: tuple[str, str, bool], init_args: tuple) -> None:
+    """頂層 spawn 目標（必須是模組級函數，Windows 才能 pickle）。"""
+    global _PROGRESS_Q, _CASE_T0
+    _CASE_T0 = time.perf_counter()
+    _PROGRESS_Q = queue
+    try:
+        _init_worker(*init_args)
+        _apply_worker_gen_budget(_worker_aim_s())
+        try:
+            _queue_put(queue, ("ok", run_case(job)))
+        except Exception as exc:  # noqa: BLE001
+            folder, name, _ws = job
+            _queue_put(
+                queue,
+                (
+                    "err",
+                    {
+                        "folder": folder,
+                        "name": name,
+                        "error": f"{exc}",
+                        "errors": ["EXCEPTION"],
+                        "elapsed_s": 0.0,
+                    },
+                ),
+            )
+    finally:
+        _PROGRESS_Q = None
+
+
 def run_case(job: tuple[str, str, bool]) -> dict:
     folder, name, write_sheet = job
+    t_case = time.perf_counter()
     from app.color_utils import detect_background
     from app.processor import (
         _fine_grid_aligned,
         _to_rgb_array,
-        make_seamless_hard_cut,
         stamp_structure_view,
     )
     from app.quality import (
@@ -403,11 +724,13 @@ def run_case(job: tuple[str, str, bool]) -> dict:
         design_error,
         edge_void_ratio,
         geometry_fidelity,
+        ink_frac,
         motif_fragment_ratio,
         seam_report,
         tone_shift,
         wrap_cut_ratio,
         wrap_density_ratio,
+        wrap_edge_color_break,
         wrap_gutter_error,
         wrap_hotspot,
         wrap_orphan_run,
@@ -438,7 +761,7 @@ def run_case(job: tuple[str, str, bool]) -> dict:
         s_rep = seam_report(src)
 
         t0 = time.perf_counter()
-        unit, mode = make_seamless_hard_cut(img, bg)
+        unit, mode = _make_seamless_with_budget(img, bg, t_case)
         elapsed = time.perf_counter() - t0
 
         out = _to_rgb_array(unit, bg)
@@ -491,6 +814,8 @@ def run_case(job: tuple[str, str, bool]) -> dict:
                 "gutter": round(wrap_gutter_error(out_view), 3),
                 "src_period_rem": round(wrap_period_remainder(src), 3),
                 "period_rem": round(wrap_period_remainder(out), 3),
+                "edge_color_break": round(wrap_edge_color_break(out_view), 2),
+                "ink": round(ink_frac(out), 3),
                 "fine_aligned": bool(_fine_grid_aligned(out)),
                 "unchanged": bool(
                     src.shape == out.shape and np.array_equal(src, out)
@@ -499,35 +824,134 @@ def run_case(job: tuple[str, str, bool]) -> dict:
             }
         )
         row["errors"] = check(row)
-        from app.select import verify_tiling
-
-        if "清邊補花" in (row.get("mode") or ""):
-            vcls = "A"
-        elif "週期裁切" in (row.get("mode") or "") or "點綴晶格" in (row.get("mode") or ""):
-            vcls = "B"
-        else:
-            vcls = "C"
-        row["verify_cls"] = vcls
-        row["verify_errors"] = verify_tiling(
-            out, cls=vcls, src_density=row.get("src_wrap_density")
-        )
+        row["verify_cls"] = ""
+        row["verify_errors"] = []
+        # 量測一完就交卷：審查牆 I/O 再慢，父行程也能拿到真圖列。
+        _publish_case_row(row)
 
         if write_sheet:
-            sheet = _contact_sheet(src, out, row)
+            remain = _seconds_left(t_case)
             tag = "FAIL" if row["errors"] else "pass"
-            dest = OUT / "sheets" / f"{tag}__{_sheet_name(folder, name)}.png"
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            sheet.save(dest)
-            row["sheet"] = str(dest.relative_to(OUT))
-            tiled = Image.fromarray(plain_tile_2x2(out))
-            thumb = OUT / "wall" / f"{tag}__{_sheet_name(folder, name)}.jpg"
-            _write_wall_thumb(tiled, thumb)
-            row["wall"] = str(thumb.relative_to(OUT))
+            if remain >= 3.0:
+                sheet = _contact_sheet(src, out, row)
+                dest = OUT / "sheets" / f"{tag}__{_sheet_name(folder, name)}.png"
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                sheet.save(dest)
+                row["sheet"] = str(dest.relative_to(OUT))
+            if remain >= 1.2:
+                tiled = Image.fromarray(plain_tile_2x2(out))
+                thumb = OUT / "wall" / f"{tag}__{_sheet_name(folder, name)}.jpg"
+                _write_wall_thumb(tiled, thumb)
+                row["wall"] = str(thumb.relative_to(OUT))
+            if row.get("sheet") or row.get("wall"):
+                _publish_case_row(row)
     except Exception as exc:  # noqa: BLE001 — 批次要繼續
+        if _row_rank(row) >= 3:
+            row["sheet_error"] = f"{exc}"
+            _publish_case_row(row)
+            return row
         row["error"] = f"{exc}"
         row["trace"] = traceback.format_exc(limit=6)
         row["errors"] = ["EXCEPTION"]
     return row
+
+
+def _timeout_fail_row(folder: str, name: str, elapsed: float) -> dict:
+    return {
+        "folder": folder,
+        "name": name,
+        "mode": f"前景 ?｜未達標［超時:{HARD_CASE_TIMEOUT_S:.0f}s］",
+        "errors": ["mode_未達標", f"超時:{HARD_CASE_TIMEOUT_S:.0f}s"],
+        "elapsed_s": round(elapsed, 1),
+        "timed_out": True,
+        "src_wrap_excess": 0.0,
+        "wrap_excess": 999.0,
+        "src_hotspot": 0.0,
+        "hotspot": 999.0,
+        "wrap_cut": 8.0,
+        "wrap_density": 0.0,
+        "edge_color_break": 99.0,
+        "size": [0, 0],
+        "src_size": [0, 0],
+    }
+
+
+def _run_jobs_hard_timeout(
+    jobs: list[tuple[str, str, bool]],
+    n_proc: int,
+    init_args: tuple,
+    on_result,
+) -> None:
+    """頂層非 daemon Process。硬殺前先排空 queue，優先用子行程已交的真結果。"""
+    ctx = mp.get_context("spawn")
+    pending = list(jobs)
+    active: list[tuple] = []
+
+    def _spawn(job):
+        q = ctx.Queue(8)
+        p = ctx.Process(target=_case_process_main, args=(q, job, init_args))
+        p.daemon = False
+        p.start()
+        return p, q, job, time.perf_counter(), None
+
+    def _finish(item, payload: dict, join_q: bool) -> None:
+        p, q, job, _t0, _last = item
+        folder, name, _ws = job
+        on_result(payload)
+        _clear_case_snap(folder, name)
+        try:
+            p.join(1)
+        except Exception:
+            pass
+        _close_queue(q, join=join_q)
+        try:
+            active.remove(item)
+        except ValueError:
+            pass
+
+    while pending or active:
+        while pending and len(active) < max(1, n_proc):
+            active.append(_spawn(pending.pop(0)))
+        progressed = False
+        for item in list(active):
+            p, q, job, t0, last_msg = item
+            folder, name, _ws = job
+            last_msg = _prefer_msg(last_msg, _drain_queue(q, wait_s=0.0))
+            try:
+                idx = active.index(item)
+            except ValueError:
+                continue
+            item = (p, q, job, t0, last_msg)
+            active[idx] = item
+            alive = p.is_alive()
+            elapsed = time.perf_counter() - t0
+            if not alive:
+                last_msg = _prefer_msg(last_msg, _drain_queue(q, wait_s=2.0))
+                payload = _row_from_sources(last_msg, _read_case_snap(folder, name))
+                if payload is None:
+                    payload = _timeout_fail_row(folder, name, elapsed)
+                _finish(item, payload, join_q=True)
+                progressed = True
+            elif elapsed >= HARD_CASE_TIMEOUT_S:
+                # 子行程可能已 put；TerminateProcess 之後再也交不出新結果。
+                last_msg = _prefer_msg(
+                    last_msg, _drain_queue(q, wait_s=_QUEUE_BEFORE_KILL_S)
+                )
+                payload = _row_from_sources(last_msg, _read_case_snap(folder, name))
+                if p.is_alive():
+                    p.terminate()
+                    p.join(5)
+                    last_msg = _prefer_msg(last_msg, _drain_queue(q, wait_s=0.0))
+                    payload = _row_from_sources(
+                        last_msg, payload, _read_case_snap(folder, name)
+                    )
+                if payload is None:
+                    payload = _timeout_fail_row(folder, name, elapsed)
+                _finish(item, payload, join_q=False)
+                progressed = True
+        if not progressed:
+            time.sleep(0.25)
+
 
 
 def collect(src: Path, only: str, limit: int) -> list[tuple[str, str]]:
@@ -556,10 +980,15 @@ def _pixels(folder: str, name: str) -> int:
         return 0
 
 
-def _init_worker(src: str, out: str) -> None:
-    global SRC, OUT
+def _init_worker(src: str, out: str, aim_s: str | float | None = None) -> None:
+    global SRC, OUT, _WORKER_AIM_S
     SRC = Path(src)
     OUT = Path(out)
+    if aim_s is not None and str(aim_s) != "":
+        try:
+            _WORKER_AIM_S = float(aim_s)
+        except (TypeError, ValueError):
+            _WORKER_AIM_S = WORKER_AIM_S
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["MKL_NUM_THREADS"] = "1"
     os.environ["OPENBLAS_NUM_THREADS"] = "1"
@@ -927,7 +1356,7 @@ def main() -> int:
         partial_path.unlink()
 
     sheets = not args.no_sheets
-    init_args = (str(SRC.resolve()), str(OUT.resolve()))
+    init_args = (str(SRC.resolve()), str(OUT.resolve()), WORKER_AIM_S)
     partial_f = partial_path.open("a", encoding="utf-8")
     try:
         for group, n_proc in ((small, workers), (huge, 1)):
@@ -940,17 +1369,13 @@ def main() -> int:
             ]
             if not jobs:
                 continue
-            with mp.Pool(
-                processes=n_proc,
-                initializer=_init_worker,
-                initargs=init_args,
-                maxtasksperchild=1,
-            ) as pool:
-                for r in pool.imap_unordered(run_case, jobs, chunksize=1):
-                    rows.append(r)
-                    partial_f.write(json.dumps(r, ensure_ascii=False) + "\n")
-                    partial_f.flush()
-                    report(r)
+            def _on_result(r: dict) -> None:
+                rows.append(r)
+                partial_f.write(json.dumps(r, ensure_ascii=False) + "\n")
+                partial_f.flush()
+                report(r)
+
+            _run_jobs_hard_timeout(jobs, n_proc, init_args, _on_result)
     finally:
         partial_f.close()
 

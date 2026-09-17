@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Sequence
 
@@ -359,7 +360,7 @@ def layout_stats_from_groups(
         if big:
             main = float(np.median(np.asarray(big, dtype=np.float64)))
             # 碎點把中位數拉到雪人／冬青的一半以下時，環帶才跟著主圖章加寬。
-            if main > span * 2.0:
+            if main > span * 1.4:
                 span = main
     return LayoutStats(
         d_nn=float(nn),
@@ -428,6 +429,7 @@ def dart_throw_motifs(
     ring: float | None,
     target: int,
     max_tries: int = 0,
+    interior_margin: float = 0.0,
 ) -> int:
     """在環面（或環帶）放置圖章。回傳成功件數。"""
     from app.processor import _pick_motif, stamp_motif_wrapped
@@ -449,6 +451,7 @@ def dart_throw_motifs(
     d_need = max(8.0, 0.85 * stats.d_min)
     areas = stats.areas if stats.areas.size else np.array([templates[0].area])
     colors = stats.colors or [None]
+    keep = float(max(0.0, interior_margin))
     for _ in range(max_tries):
         if placed >= target:
             break
@@ -460,6 +463,8 @@ def dart_throw_motifs(
             cx = float(rng.uniform(0.0, w))
             if not _in_ring(cy, cx, h, w, ring):
                 continue
+        if keep > 0.0 and min(cx, w - cx, cy, h - cy) <= keep:
+            continue
         target_area = int(rng.choice(areas))
         color = colors[int(rng.integers(0, len(colors)))] if colors else None
         motif = _pick_motif(templates, target_area, rng, target_rgb=color)
@@ -508,6 +513,31 @@ def relayout_ring(
         target = 1
     lo = max(1, int(round(target * 0.90))) if target else 0
     hi = max(lo, int(round(target * 1.10))) if target else 0
+    # 環帶目標若只靠 interior density×面積，大圖章會少到補不滿十字。
+    if not full and use_ring is not None and stats.d_nn > 0:
+        by_nn = int(round(2.0 * (h + w) / max(float(stats.d_nn), 12.0)))
+        hi = max(hi, max(6, by_nn // 2))
+    # 整張重排：畫心與 wrap 分開填。畫心太靠近縫，閉運算會把跨縫半片
+    # 跟近框整顆黏成「假接」切圖；keep 太寬又會空出一圈白帶。
+    keep = 0.0
+    if full:
+        span = float(stats.span)
+        # 跨縫半片外伸約 0.5×span；畫心件同寬。keep 必須 > span，
+        # 再加閉運算核，否則 wrap_cut 會把「真跨縫＋近框整顆」黏成假接。
+        # keep 必須 ≥ place_along_wrap 的 inner_need（≈0.95×span），
+        # 否則跨縫件跟畫心衝突，縫上貼不下 → dens 假好／void 爆高。
+        keep = min(
+            0.22 * min(h, w),
+            max(
+                0.98 * float(span) + 12.0,
+                0.70 * float(stats.d_nn),
+                8.0,
+            ),
+        )
+        # 畫心件數要比照可放區域，別只靠全圖 density（清邊後偏低）。
+        inner_area = max(1.0, float((h - 2.0 * keep) * (w - 2.0 * keep)))
+        by_grid = int(round(inner_area / max(float(stats.d_nn) ** 2, 64.0)))
+        hi = max(hi, max(8, by_grid))
     dart_throw_motifs(
         out,
         occ,
@@ -516,8 +546,12 @@ def relayout_ring(
         rng,
         ring=use_ring,
         target=hi,
+        max_tries=12000 if full else 0,
+        interior_margin=keep,
     )
-    _place_along_wrap(out, occ, templates, stats, rng)
+    # 整張重排若只在畫心丟點，圖章幾乎不會跨縫，2×2 仍是空十字。
+    # 過密來自之後又用更密的 d_nn 再塞一圈，不是這一條 wrap 線。
+    _place_along_wrap(out, occ, templates, stats, rng, prefer_hero=full)
     return out
 
 
@@ -527,12 +561,31 @@ def _place_along_wrap(
     templates: list,
     stats: LayoutStats,
     rng: np.random.Generator,
+    *,
+    prefer_hero: bool = False,
+    relax_inner: float = 1.0,
+    max_place: int | None = None,
+    deadline: float | None = None,
 ) -> int:
-    """沿四條 wrap 線再補一圈，確保有圖章跨縫，而不是全部停在環帶內側。"""
-    from app.processor import _pick_motif
+    """沿四條 wrap 線再補一圈，確保有圖章跨縫，而不是全部停在環帶內側。
+
+    relax_inner：<1 時放寬與畫心的間距（只用於 dens 差一點過關時補縫）。
+    max_place：限制本輪最多貼幾枚（dens 急救時一次一枚，避免 0.56→1.5）。
+    """
+    from app.processor import _pick_motif, _torus_distance, stamp_motif_wrapped
 
     h, w = canvas.shape[:2]
-    step = max(12.0, stats.d_nn)
+    span = max(8.0, float(stats.span))
+    # 允許 dens 急救用的極低 ri（舊地板 0.40 會把 0.14 夾死，十字永遠補不回）。
+    ri = float(max(0.12, min(1.0, relax_inner)))
+    step = max(12.0, 0.55 * float(stats.d_nn))
+    if prefer_hero:
+        step = max(12.0, 0.52 * float(stats.d_nn))
+    # dens／錯色補縫：縮步長多試點，否則清邊後十字永遠 0.55–0.65。
+    if ri < 0.95:
+        step = max(8.0, step * (0.42 + 0.58 * ri))
+    if ri < 0.35:
+        step = max(7.0, step * 0.65)
     if step <= 0 or not templates:
         return 0
     centers: list[tuple[float, float]] = []
@@ -544,11 +597,40 @@ def _place_along_wrap(
     while t < w:
         centers.append((0.0, t))
         t += step
+    # 半步錯位再一輪候選，避免全落在已佔中心上貼不進。
+    if ri < 0.85:
+        half = 0.5 * step
+        t = half
+        while t < h:
+            centers.append((t, 0.0))
+            t += step
+        t = half
+        while t < w:
+            centers.append((0.0, t))
+            t += step
     order = rng.permutation(len(centers))
     centers = [centers[int(i)] for i in order]
     areas = stats.areas if stats.areas.size else np.array([templates[0].area])
+    wrap_templates = templates
+    pick_areas = areas
+    if prefer_hero and areas.size:
+        med = float(np.median(areas))
+        hero_areas = areas[areas >= med * 0.85]
+        if hero_areas.size:
+            pick_areas = hero_areas
+        big = [t for t in templates if t.area >= med * 0.45]
+        if len(big) >= 2:
+            wrap_templates = big
     colors = stats.colors or [None]
-    d_need = max(8.0, 0.85 * stats.d_min)
+    wrap_need = max(8.0, 0.55 * float(stats.d_min), 0.52 * float(stats.d_nn))
+    if ri < 0.95:
+        wrap_need = max(5.5, wrap_need * (0.50 + 0.50 * ri))
+    if ri < 0.35:
+        wrap_need = max(4.5, wrap_need * 0.62)
+    inner_need = max(wrap_need, 0.92 * span * ri)
+    if ri < 0.35:
+        # 極疏時放寬與畫心衝突，允許更貼邊。
+        inner_need = max(wrap_need, 0.45 * span * ri)
     cents: list[tuple[float, float]] = []
     n, _, st, ct = cv2.connectedComponentsWithStats(
         occupied.astype(np.uint8), connectivity=8
@@ -558,13 +640,50 @@ def _place_along_wrap(
             cents.append((float(ct[i][1]), float(ct[i][0])))
     placed = 0
     for cy, cx in centers:
-        target_area = int(rng.choice(areas))
-        color = colors[int(rng.integers(0, len(colors)))] if colors else None
-        motif = _pick_motif(templates, target_area, rng, target_rgb=color)
-        if not _place_ok(motif, cy, cx, occupied, cents, d_need, h, w):
+        if deadline is not None and time.perf_counter() >= float(deadline) - 1.2:
+            break
+        if cy <= 1.0 and (cx < step * 0.40 or cx > w - step * 0.40):
             continue
-        from app.processor import stamp_motif_wrapped
+        target_area = int(rng.choice(pick_areas))
+        color = colors[int(rng.integers(0, len(colors)))] if colors else None
+        # 對邊／同側／圖章錨：邊 wipe 後勿左右亂抽造陰陽臉。
+        try:
+            from app.processor import (
+                _opposite_edge_ink_rgb,
+                _same_edge_ink_rgb,
+                _templates_anchor_rgb,
+            )
 
+            opp = _opposite_edge_ink_rgb(canvas, cy, cx)
+            if opp is not None:
+                color = opp
+            else:
+                same = _same_edge_ink_rgb(canvas, cy, cx)
+                if same is not None:
+                    color = same
+                else:
+                    anchor = _templates_anchor_rgb(wrap_templates)
+                    if anchor is not None:
+                        color = anchor
+        except Exception:
+            pass
+        motif = _pick_motif(wrap_templates, target_area, rng, target_rgb=color)
+        if _sits_on_wrap_without_crossing(motif, cy, cx, h, w):
+            continue
+        conflict = False
+        for ky, kx in cents:
+            dist = _torus_distance(cy, cx, ky, kx, h, w)
+            on_wrap = min(kx, w - kx, ky, h - ky) <= 1.5
+            need = wrap_need if on_wrap else inner_need
+            if dist < need:
+                conflict = True
+                break
+        if conflict:
+            continue
+        from app.processor import _overlap_ratio
+
+        if _overlap_ratio(occupied, motif, cy, cx, occupied) > 0.03:
+            continue
         stamp_motif_wrapped(canvas, motif, cy, cx)
         my, mx = np.where(motif.mask)
         if len(my):
@@ -573,6 +692,8 @@ def _place_along_wrap(
             occupied[(top + my) % h, (left + mx) % w] = True
         cents.append((cy, cx))
         placed += 1
+        if max_place is not None and placed >= int(max_place):
+            break
     return placed
 
 

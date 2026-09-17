@@ -313,15 +313,17 @@ def check_recovered(row: dict) -> list[str]:
     """成品 TIFF 沒有策略標籤。
 
     尺寸變了不代表一定是週期裁切（清邊補花／最小誤差切也會改尺寸），
-    不能拿 crop 的 period_rem／熱點門檻去打。原圖直出才用完整 sweep 閘門；
-    其餘只擋色差縫、內部新斷裂，以及稀疏圖章的切圖／過密。
+    不能拿 crop 的熱點門檻去放行。原圖直出才用完整 sweep 閘門；
+    其餘擋色差縫、錯格餘數、溝寬、過密／過疏、以及稀疏圖章切圖。
     """
     import sweep_all
     from app.select import (
         GUTTER_ERR_MAX,
         ORPHAN_RUN_MAX,
+        PERIOD_REM_MAX,
         WRAP_CUT_MAX,
         WRAP_DENSITY_MAX,
+        WRAP_DENSITY_MIN,
     )
 
     ink = float(row.get("ink") or 0)
@@ -333,25 +335,30 @@ def check_recovered(row: dict) -> list[str]:
     if float(row.get("wrap_excess") or 0) > 5.0:
         errs.append(f"接縫未消:{row['wrap_excess']:.1f}")
     allow = max(float(row.get("src_internal_excess") or 0), 6.0) * 1.15 + 2.0
+    mode = str(row.get("mode") or "")
+    if "清邊補花" in mode and float(row.get("wrap_cut") or 0) <= 0.30:
+        allow += 4.0
     if float(row.get("internal_excess") or 0) > allow:
         errs.append(
             f"內部新增斷裂:{row['internal_excess']:.1f}>{allow:.1f}"
         )
-    if (
-        ink < 0.42
-        and float(row.get("wrap_cut") or 0) > WRAP_CUT_MAX
-        and float(row.get("hotspot") or 0) > 14.0
-    ):
+    # 規則格常 hot 很低但半隻圖章仍在：不再要求 hotspot。
+    if ink < 0.42 and float(row.get("wrap_cut") or 0) > WRAP_CUT_MAX:
         errs.append(f"接縫切圖:{row['wrap_cut']:.0%}")
-    if ink < 0.42 and float(row.get("wrap_density") or 0) > WRAP_DENSITY_MAX:
-        if row.get("unchanged"):
-            errs.append(f"接縫過密:{row['wrap_density']:.2f}")
+    dens = float(row.get("wrap_density") or 0)
+    if ink < 0.42 and dens > WRAP_DENSITY_MAX:
+        errs.append(f"接縫過密:{dens:.2f}")
+    if ink < 0.42 and dens < WRAP_DENSITY_MIN:
+        errs.append(f"接縫過疏:{dens:.2f}")
     if int(row.get("orphan") or 0) > ORPHAN_RUN_MAX:
         errs.append(f"接縫殘片:{row['orphan']}px")
-    if float(row.get("gutter") or 0) > GUTTER_ERR_MAX and float(
-        row.get("src_gutter") or 0
-    ) <= GUTTER_ERR_MAX:
-        errs.append(f"接縫錯格:{row['gutter']:.0%}")
+    gut = float(row.get("gutter") or 0)
+    src_gut = float(row.get("src_gutter") or 0)
+    if gut > GUTTER_ERR_MAX and src_gut <= GUTTER_ERR_MAX:
+        errs.append(f"接縫錯格:{gut:.0%}")
+    prem = float(row.get("period_rem") or 0)
+    if prem > PERIOD_REM_MAX:
+        errs.append(f"接縫錯格:{prem:.0%}")
     row["mode"] = row.get("mode") or f"加工｜前景 {ink:.0%}"
     return errs
 

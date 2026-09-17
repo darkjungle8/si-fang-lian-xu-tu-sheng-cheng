@@ -26,13 +26,14 @@ from app.processor import (
 )
 from app.quality import (
     motif_fragment_ratio,
+    seam_report,
     wrap_cut_ratio,
+    wrap_density_ratio,
     wrap_gutter_error,
     wrap_hotspot,
     wrap_hotspot_axes,
     wrap_orphan_run,
     wrap_period_remainder,
-    seam_report,
 )
 from app.select import (
     Candidate,
@@ -758,6 +759,55 @@ class MotifIntegrityTests(unittest.TestCase):
             cand.errors,
         )
 
+    def test_crop_clean_overdense_wrap_is_rejected(self) -> None:
+        """色差縫為 0 仍可能縫上雙樹黏合（過密）——crop_clean 不能免。"""
+        from app.select import WRAP_DENSITY_MAX
+
+        n = 256
+        arr = np.full((n, n, 3), (20, 140, 70), dtype=np.uint8)
+        # 只在左右邊緣放幾乎對接的圓，抬高十字帶密度
+        for y in range(32, n, 48):
+            cv2.circle(arr, (4, y), 22, (240, 240, 240), -1)
+            cv2.circle(arr, (n - 5, y), 22, (240, 240, 240), -1)
+        from app.processor import stamp_structure_view as _ssv
+
+        dens = wrap_density_ratio(_ssv(arr))
+        self.assertGreater(dens, WRAP_DENSITY_MAX, dens)
+        src = source_facts(np.full((n, n, 3), (20, 140, 70), dtype=np.uint8))
+        cand = Candidate(arr, "週期裁切", True, [("crop", (0, 0, n, n))])
+        measure(src, cand)
+        self.assertTrue(
+            any(e.startswith("接縫過密") for e in cand.errors),
+            (cand.errors, dens),
+        )
+
+    def test_check_recovered_flags_period_rem(self) -> None:
+        """成品稽核必須擋 period_rem 假 PASS。"""
+        import sys
+        from pathlib import Path
+
+        tests_dir = Path(__file__).resolve().parent
+        if str(tests_dir) not in sys.path:
+            sys.path.insert(0, str(tests_dir))
+        from audit_prod import check_recovered
+
+        row = {
+            "unchanged": False,
+            "ink": 0.25,
+            "wrap_excess": 1.0,
+            "src_internal_excess": 2.0,
+            "internal_excess": 2.0,
+            "wrap_cut": 0.0,
+            "hotspot": 0.0,
+            "wrap_density": 0.90,
+            "orphan": 0,
+            "gutter": 0.0,
+            "src_gutter": 0.0,
+            "period_rem": 0.35,
+        }
+        errs = check_recovered(row)
+        self.assertTrue(any(e.startswith("接縫錯格") for e in errs), errs)
+
     def test_true_wrap_halves_are_not_wrap_cut(self) -> None:
         arr = np.full((220, 220, 3), 245, dtype=np.uint8)
         for cx, cy in ((70, 70), (150, 70), (70, 150), (150, 150)):
@@ -855,6 +905,29 @@ class ClearRefillRepairTests(unittest.TestCase):
         self.assertNotIn("未達標", mode, mode)
         u = np.asarray(unit.convert("RGB"))
         self.assertLessEqual(wrap_cut_ratio(u), 0.40, mode)
+
+    def test_separated_icons_fill_wrap_not_nine_grid(self) -> None:
+        """圖章停在中腹時，輸出 2×2 十字密度必須回到 0.70 以上。"""
+        n = 400
+        bg = (199, 232, 227)
+        arr = np.full((n, n, 3), bg, dtype=np.uint8)
+        colors = [(30, 90, 50), (180, 40, 40), (220, 180, 60)]
+        k = 0
+        for y in range(55, n - 50, 72):
+            for x in range(55, n - 50, 72):
+                cv2.rectangle(
+                    arr, (x - 16, y - 12), (x + 16, y + 12), colors[k % 3], -1
+                )
+                k += 1
+        arr[:, :4] = np.clip(arr[:, :4].astype(np.int16) - 10, 0, 255)
+        from app.processor import is_stamp_sheet, stamp_structure_view as _ssv
+
+        self.assertTrue(is_stamp_sheet(arr, bg, 40.0))
+        unit, mode = make_seamless_hard_cut(Image.fromarray(arr), bg=bg)
+        u = np.asarray(unit.convert("RGB"))
+        dens = wrap_density_ratio(_ssv(u))
+        self.assertGreaterEqual(dens, 0.70, (dens, mode))
+        self.assertLessEqual(wrap_cut_ratio(u), 0.60, mode)
 
     def test_sliver_join_is_refilled(self) -> None:
         """對邊杏仁殘片環面假接，第二輪必須清掉再貼完整圖章。"""
@@ -1197,7 +1270,59 @@ class ClearRefillRepairTests(unittest.TestCase):
 
         crowd = wrap_density_ratio(filled)
         self.assertLessEqual(crowd, 1.15, crowd)
+        self.assertGreaterEqual(crowd, 0.70, crowd)
         self.assertLessEqual(wrap_cut_ratio(filled), 0.40, wrap_cut_ratio(filled))
+
+    def test_framed_scatter_flags_sparse_wrap(self) -> None:
+        """圖章全在畫面中腹、四邊空白：2×2 白十字要判接縫過疏。"""
+        n = 240
+        arr = np.full((n, n, 3), 250, dtype=np.uint8)
+        for y in range(56, 190, 42):
+            for x in range(56, 190, 42):
+                cv2.circle(arr, (x, y), 14, (40, 80, 160), -1)
+        src = source_facts(arr)
+        cand = Candidate(arr, "原圖", True, [])
+        measure(src, cand)
+        self.assertTrue(
+            any(e.startswith("接縫過疏") for e in cand.errors),
+            cand.errors,
+        )
+        self.assertFalse(
+            source_looks_seamless(
+                src.rep,
+                src.hotspot,
+                wrap_cut=src.wrap_cut,
+                orphan=src.orphan,
+                fragment=src.fragment,
+                gutter=src.gutter,
+                wrap_density=src.wrap_density,
+            )
+        )
+
+    def test_framed_scatter_relayout_fills_wrap(self) -> None:
+        """中腹散點清邊後必須整張重排，十字帶密度回到 0.70 以上。"""
+        n = 280
+        bg = (248, 244, 236)
+        arr = np.full((n, n, 3), bg, dtype=np.uint8)
+        for y in range(70, 220, 48):
+            for x in range(70, 220, 48):
+                cv2.circle(arr, (x, y), 16, (30, 70, 140), -1)
+        logs: list[str] = []
+        unit, mode = make_seamless_hard_cut(
+            Image.fromarray(arr), bg=bg, log=logs.append
+        )
+        self.assertTrue(
+            any("跳過週期裁切" in m for m in logs),
+            logs,
+        )
+        self.assertNotIn("未達標", mode, mode)
+        self.assertIn("整張重排", mode, mode)
+        u = np.asarray(unit.convert("RGB"))
+        from app.processor import stamp_structure_view as _ssv
+
+        dens = wrap_density_ratio(_ssv(u))
+        self.assertGreaterEqual(dens, 0.70, (dens, mode))
+        self.assertLessEqual(seam_report(u).wrap_excess, 5.0, mode)
 
     def test_large_edge_blobs_snap_across_wrap(self) -> None:
         """大雪人停在 8px wrap 帶裡：清邊必須整隻拿走並跨縫貼回。"""

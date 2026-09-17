@@ -442,6 +442,15 @@ def _component_solidity(mask: np.ndarray) -> float | None:
     return area / hull_area
 
 
+def _unwrap_big_cc_count(mask: np.ndarray, min_area: int = 200) -> int:
+    """環面解開後，面積達標的連通域數。真跨縫=1，對邊兩朵假接≥2。"""
+    m = _unwrap_torus_mask(mask).astype(np.uint8)
+    n, _, st, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
+    if n <= 1:
+        return 0
+    return int(np.sum(st[1:, cv2.CC_STAT_AREA] >= int(min_area)))
+
+
 def motif_fragment_ratio(arr: np.ndarray) -> float:
     """
     尺寸相近的圖章裡，實心度明顯低於同伴的比例。
@@ -780,12 +789,27 @@ def wrap_cut_repair(arr: np.ndarray) -> WrapCutRepair:
             for i in ids
             if int(stats[i, cv2.CC_STAT_AREA]) >= 200
         ]
+        # hero 跨縫合併面積常達 2×typical；補 dens 時用 prefer_hero=False，
+        # 這裡維持 1.8 才能把假接殺乾淨（否則 kill 後 cut 停在 2.x）。
         glued = area > typical * 1.80
         two_wholes = (
             len(parts) >= 2
             and min(parts) > typical * 0.62
             and area > typical * 1.70
         )
+        # 真跨縫 hero：解開環面是單一實心圖章。勿用 area≤2.85×typical
+        # 卡死——interior typical 常是小組件，hero 模板 3～7 倍仍是一隻花。
+        if two_wholes or glued:
+            member = np.isin(labels, np.asarray(ids, dtype=labels.dtype))
+            unwrapped = _unwrap_torus_mask(member)
+            solid = _component_solidity(unwrapped)
+            if (
+                solid is not None
+                and solid >= 0.72
+                and _unwrap_big_cc_count(member) <= 1
+            ):
+                glued = False
+                two_wholes = False
         # 對邊各一條杏仁殘片：環面併起來面積仍遠小於完整圖章，舊邏輯
         # 當成「接好」。波點錯相位就是這樣綠燈的。
         sliver_join = (
@@ -908,6 +932,31 @@ def wrap_gutter_error(arr: np.ndarray) -> float:
     return float(err)
 
 
+def wrap_edge_color_break(arr: np.ndarray) -> float:
+    """
+    左右邊緣同時有墨時的平均色差。
+
+    wrap_cut=0 仍可能粉灰大象對接成「陰陽臉」：幾何接上、顏色錯相位。
+    地色溝接縫（對邊無同時著墨）回傳 0。
+    """
+    ink = ink_mask(arr)
+    if ink.shape[0] < 8 or ink.shape[1] < 8:
+        return 0.0
+    both = ink[:, 0] & ink[:, -1]
+    if int(both.sum()) < 12:
+        both_h = ink[0, :] & ink[-1, :]
+        if int(both_h.sum()) < 12:
+            return 0.0
+        diff = np.abs(
+            arr[0, both_h].astype(np.float32) - arr[-1, both_h].astype(np.float32)
+        )
+        return float(diff.mean())
+    diff = np.abs(
+        arr[both, 0].astype(np.float32) - arr[both, -1].astype(np.float32)
+    )
+    return float(diff.mean())
+
+
 def _axis_gutter_error(occupied: np.ndarray) -> float:
     occ = np.asarray(occupied, dtype=bool)
     idx = np.flatnonzero(occ)
@@ -935,6 +984,26 @@ def _axis_gutter_error(occupied: np.ndarray) -> float:
     return abs(float(wrap_gap) - typical_gap) / typical_gap
 
 
+def _axis_spacing_regular(occupied: np.ndarray) -> bool:
+    """一維佔用是否像格紋／規則點陣（間距 MAD 夠小）。"""
+    gaps = _interior_bg_runs(np.asarray(occupied, dtype=bool))
+    if gaps.size < 3:
+        return False
+    stamp = _interior_bg_runs(~np.asarray(occupied, dtype=bool))
+    typical_stamp = (
+        float(np.median(stamp[stamp >= 12])) if np.any(stamp >= 12) else 0.0
+    )
+    min_gap = max(16, int(round(typical_stamp * 0.15))) if typical_stamp else 16
+    large = gaps[gaps >= min_gap]
+    if large.size < 3:
+        return False
+    typical_gap = float(np.median(large))
+    if typical_gap < 16.0:
+        return False
+    mad = float(np.median(np.abs(large.astype(np.float64) - typical_gap)))
+    return mad <= typical_gap * 0.35
+
+
 def wrap_period_remainder(arr: np.ndarray) -> float:
     """
     單元邊長對強週期的最短餘數比例。
@@ -942,11 +1011,16 @@ def wrap_period_remainder(arr: np.ndarray) -> float:
     滿幅裁切把高度做成 3×525、寬度仍是 2048 時，Y 整除、X 餘 140px。
     接縫色差可以是 0（地色溝對上），波點格子卻對不齊。只在兩軸都偵測到
     強週期時才看該軸；單軸條紋沒有另一軸週期，餘數視為 0。
+
+    散點／藍噪聲圖章的投影自相關常冒出假週期（底色主導 repeat_error），
+    裁成「週期倍」反而剖開圖章。無細格紋且軸向間距不規則時，餘數視為 0，
+    改由 dens／cut／gutter／ecb 管視覺接縫。
     """
     from app.processor import (
         _len_period_rem,
         _luma_square_grid_pitch,
         _luminance_map,
+        _mae_copy_period,
         _strong_axis_periods,
     )
 
@@ -955,6 +1029,15 @@ def wrap_period_remainder(arr: np.ndarray) -> float:
     fine = _luma_square_grid_pitch(arr)
     if fine is not None:
         return max(_len_period_rem(w, fine[0]), _len_period_rem(h, fine[1]))
+    mae_x = _mae_copy_period(arr, 1)
+    mae_y = _mae_copy_period(arr, 0)
+    ink = ink_mask(arr)
+    # 兩軸都規則才算真格點；單軸偶然規則會讓散點雪人假週期餘數爆掉。
+    lattice = _axis_spacing_regular(ink.any(axis=0)) and _axis_spacing_regular(
+        ink.any(axis=1)
+    )
+    if mae_x is None and mae_y is None and not lattice:
+        return 0.0
     xs = _strong_axis_periods(gray, 0)[:1]
     ys = _strong_axis_periods(gray, 1)[:1]
 
